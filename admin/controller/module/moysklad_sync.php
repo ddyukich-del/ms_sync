@@ -1,0 +1,814 @@
+<?php
+namespace Opencart\Admin\Controller\Extension\MoyskladSync\Module;
+
+use MoyskladSync\ApiException;
+use MoyskladSync\HttpClient;
+use MoyskladSync\MoyskladClient;
+use MoyskladSync\CategorySyncService;
+use MoyskladSync\ProductSyncService;
+use MoyskladSync\StockSyncService;
+use MoyskladSync\ImageSyncService;
+use MoyskladSync\TaskRunner;
+
+class MoyskladSync extends \Opencart\System\Engine\Controller {
+    private const SETTING_CODE = 'module_moysklad_sync';
+
+    private array $error = [];
+
+    public function index(): void {
+        // Все AJAX-действия в админке ведем через основной маршрут модуля + ajax_action.
+        // В ocStore/OpenCart 4 права доступа часто проверяются по полному route.
+        // Если дергать методы как route=...moysklad_sync.getTaskStatus, система может
+        // вернуть HTML-страницу отказа/редиректа вместо JSON, и браузер покажет ошибку
+        // Unexpected token '<'. Один основной маршрут надежнее и проще для прав.
+        $ajax_action = (string)($this->request->get['ajax_action'] ?? '');
+
+        // При обновлении архива поверх старой версии таблицы уже существуют,
+        // поэтому install() может не добавить новые колонки. На обычной загрузке
+        // страницы запускаем мягкую проверку схемы. На каждом AJAX-шаге этого не
+        // делаем, чтобы не добавлять лишние SHOW/ALTER-запросы во время импорта.
+        if ($ajax_action === '') {
+            $this->ensureModuleSchemaOnPageLoad();
+        }
+
+        if ($ajax_action !== '') {
+            $this->dispatchAjaxAction($ajax_action);
+            return;
+        }
+
+        $data = $this->load->language('extension/moysklad_sync/module/moysklad_sync');
+
+        $this->document->setTitle($this->language->get('heading_title'));
+
+        $data = array_merge($data, $this->buildPageData());
+
+        $data['header'] = $this->load->controller('common/header');
+        $data['column_left'] = $this->load->controller('common/column_left');
+        $data['footer'] = $this->load->controller('common/footer');
+
+        $this->response->setOutput($this->load->view('extension/moysklad_sync/module/moysklad_sync', $data));
+    }
+
+    /**
+     * Диспетчер внутренних AJAX-действий модуля.
+     *
+     * Мы не используем отдельные route вида .save/.runTaskStep, чтобы не зависеть
+     * от нюансов проверки прав в конкретной сборке ocStore 4.1. Все запросы идут
+     * на route=extension/moysklad_sync/module/moysklad_sync&ajax_action=...
+     */
+    private function dispatchAjaxAction(string $action): void {
+        switch ($action) {
+            case 'save':
+                $this->save();
+                break;
+            case 'test_connection':
+                $this->testConnection();
+                break;
+            case 'load_dictionaries':
+                $this->loadDictionaries();
+                break;
+            case 'start_import':
+                $this->startImport();
+                break;
+            case 'start_stock_update':
+                $this->startStockUpdate();
+                break;
+            case 'start_image_sync':
+                $this->startImageSync();
+                break;
+            case 'run_task_step':
+                $this->runTaskStep();
+                break;
+            case 'get_task_status':
+                $this->getTaskStatus();
+                break;
+            case 'stop_task':
+                $this->stopTask();
+                break;
+            default:
+                $this->load->language('extension/moysklad_sync/module/moysklad_sync');
+                $this->sendJson(['error' => $this->language->get('error_unknown_ajax_action') . ' ' . $action]);
+        }
+    }
+
+    /**
+     * Сохраняет настройки модуля.
+     *
+     * API-токен намеренно не подставляется обратно в форму. Если поле токена пустое,
+     * сохраняем уже существующий токен, чтобы пользователь не вводил его каждый раз.
+     */
+    public function save(): void {
+        $this->load->language('extension/moysklad_sync/module/moysklad_sync');
+
+        $json = [];
+
+        if (!$this->user->hasPermission('modify', 'extension/moysklad_sync/module/moysklad_sync')) {
+            $json['error'] = $this->language->get('error_permission');
+        }
+
+        $settings = $this->normaliseSettings($this->request->post ?? []);
+
+        if (!$this->validateSettings($settings)) {
+            $json['error'] = reset($this->error);
+        }
+
+        if (!$json) {
+            $this->load->model('setting/setting');
+            $this->model_setting_setting->editSetting(self::SETTING_CODE, $settings);
+
+            $json['success'] = $this->language->get('text_success');
+        }
+
+        $this->sendJson($json);
+    }
+
+    /**
+     * AJAX: проверка подключения к МойСклад.
+     *
+     * Метод использует токен из формы, если пользователь его ввел, иначе берет
+     * сохраненный токен из настроек. Это удобно: можно проверить новый токен до сохранения.
+     */
+    public function testConnection(): void {
+        $this->load->language('extension/moysklad_sync/module/moysklad_sync');
+
+        $json = [];
+
+        if (!$this->user->hasPermission('modify', 'extension/moysklad_sync/module/moysklad_sync')) {
+            $json['error'] = $this->language->get('error_permission');
+            $this->sendJson($json);
+            return;
+        }
+
+        try {
+            $client = $this->createMoyskladClientFromRequest();
+            $result = $client->testConnection();
+
+            $json['success'] = $this->language->get('text_connection_success');
+            $json['company_name'] = $result['company_name'];
+        } catch (ApiException $e) {
+            $json['error'] = $this->formatApiError($e);
+        } catch (\Throwable $e) {
+            $json['error'] = $this->language->get('error_unexpected') . ' ' . $e->getMessage();
+        }
+
+        $this->sendJson($json);
+    }
+
+    /**
+     * AJAX: загрузка справочников для настроек.
+     *
+     * Сейчас получаем склады и типы цен. Важно: это легкий ручной запрос админки,
+     * он не участвует в тяжелой синхронизации и не грузит каталог товаров.
+     */
+    public function loadDictionaries(): void {
+        $this->load->language('extension/moysklad_sync/module/moysklad_sync');
+
+        $json = [];
+
+        if (!$this->user->hasPermission('modify', 'extension/moysklad_sync/module/moysklad_sync')) {
+            $json['error'] = $this->language->get('error_permission');
+            $this->sendJson($json);
+            return;
+        }
+
+        try {
+            $client = $this->createMoyskladClientFromRequest();
+
+            $json['success'] = $this->language->get('text_dictionaries_loaded');
+            $json['warehouses'] = $client->getWarehouses(100);
+            $json['price_types'] = $client->getPriceTypes();
+        } catch (ApiException $e) {
+            $json['error'] = $this->formatApiError($e);
+        } catch (\Throwable $e) {
+            $json['error'] = $this->language->get('error_unexpected') . ' ' . $e->getMessage();
+        }
+
+        $this->sendJson($json);
+    }
+
+
+    /**
+     * AJAX: старт полного импорта.
+     *
+     * На этапе 3 метод только создает задачу. Реальная синхронизация каталога
+     * будет подключена в следующих этапах через TaskRunner и отдельные сервисы.
+     */
+    public function startImport(): void {
+        $this->startTask('import');
+    }
+
+    /** AJAX: старт задачи обновления остатков. */
+    public function startStockUpdate(): void {
+        $this->startTask('stock');
+    }
+
+    /** AJAX: старт задачи загрузки изображений. */
+    public function startImageSync(): void {
+        $this->startTask('images');
+    }
+
+    /**
+     * AJAX: выполняет один короткий шаг активной задачи.
+     *
+     * Важно: один запрос = один шаг. Мы не запускаем цикл до победного конца,
+     * потому что на слабом сервере это быстро приводит к таймаутам и расходу памяти.
+     */
+    public function runTaskStep(): void {
+        $this->load->language('extension/moysklad_sync/module/moysklad_sync');
+        $json = [];
+
+        if (!$this->user->hasPermission('modify', 'extension/moysklad_sync/module/moysklad_sync')) {
+            $json['error'] = $this->language->get('error_permission');
+            $this->sendJson($json);
+            return;
+        }
+
+        $this->loadTaskModel();
+        $this->loadCategoryModel();
+        $this->loadProductModel();
+        $this->loadImageModel();
+        $this->loadMoyskladLibraries();
+
+        $task = $this->model_extension_moysklad_sync_module_moysklad_task->getActiveTask();
+
+        if (!$task) {
+            $json['error'] = $this->language->get('error_no_active_task');
+            $this->sendJson($json);
+            return;
+        }
+
+        $runner = new TaskRunner();
+        $taskId = (int)$task['task_id'];
+
+        if (!$this->model_extension_moysklad_sync_module_moysklad_task->acquireTask($taskId, $runner->getLockTtlSeconds())) {
+            $json['error'] = $this->language->get('error_task_locked');
+            $json['task'] = $this->formatTask($task);
+            $this->sendJson($json);
+            return;
+        }
+
+        try {
+            $lockedTask = $this->model_extension_moysklad_sync_module_moysklad_task->getTask($taskId);
+            $settings = $this->getCurrentSettings();
+            $client = $this->createMoyskladClientFromSettings($settings);
+            $categoryService = new CategorySyncService(
+                $client,
+                $this->model_extension_moysklad_sync_module_moysklad_category,
+                $this->model_extension_moysklad_sync_module_moysklad_task
+            );
+            $productService = new ProductSyncService(
+                $client,
+                $this->model_extension_moysklad_sync_module_moysklad_product,
+                $this->model_extension_moysklad_sync_module_moysklad_task,
+                $categoryService
+            );
+            $stockService = new StockSyncService(
+                $client,
+                $this->model_extension_moysklad_sync_module_moysklad_product,
+                $this->model_extension_moysklad_sync_module_moysklad_task
+            );
+            $imageService = new ImageSyncService(
+                $client,
+                $this->model_extension_moysklad_sync_module_moysklad_image,
+                $this->model_extension_moysklad_sync_module_moysklad_task
+            );
+
+            $updatedTask = $runner->runOneStep($lockedTask, $this->model_extension_moysklad_sync_module_moysklad_task, $settings, [
+                'category_service' => $categoryService,
+                'product_service' => $productService,
+                'stock_service' => $stockService,
+                'image_service' => $imageService
+            ]);
+
+            if (($updatedTask['status'] ?? '') === 'running') {
+                $this->model_extension_moysklad_sync_module_moysklad_task->releaseTask($taskId);
+                $updatedTask = $this->model_extension_moysklad_sync_module_moysklad_task->getTask($taskId) ?: $updatedTask;
+            }
+
+            $json['success'] = $this->language->get('text_task_step_done');
+            $json['task'] = $this->formatTask($updatedTask);
+            $json['logs'] = $this->formatLogs($this->model_extension_moysklad_sync_module_moysklad_task->getRecentLogs(20));
+        } catch (\Throwable $e) {
+            $this->model_extension_moysklad_sync_module_moysklad_task->failTask($taskId, $e->getMessage());
+
+            $json['error'] = $this->language->get('error_task_failed') . ' ' . $e->getMessage();
+            $json['task'] = $this->formatTask($this->model_extension_moysklad_sync_module_moysklad_task->getTask($taskId) ?: []);
+        }
+
+        $this->sendJson($json);
+    }
+
+    /** AJAX: возвращает последнюю или активную задачу и свежие логи. */
+    public function getTaskStatus(): void {
+        $this->load->language('extension/moysklad_sync/module/moysklad_sync');
+        $json = [];
+
+        if (!$this->user->hasPermission('access', 'extension/moysklad_sync/module/moysklad_sync')) {
+            $json['error'] = $this->language->get('error_permission');
+            $this->sendJson($json);
+            return;
+        }
+
+        $this->loadTaskModel();
+
+        $task = $this->model_extension_moysklad_sync_module_moysklad_task->getActiveTask()
+            ?: $this->model_extension_moysklad_sync_module_moysklad_task->getLatestTask();
+
+        $json['task'] = $this->formatTask($task ?: []);
+        $json['logs'] = $this->formatLogs($this->model_extension_moysklad_sync_module_moysklad_task->getRecentLogs(20));
+
+        $this->sendJson($json);
+    }
+
+    /** AJAX: останавливает активную задачу. */
+    public function stopTask(): void {
+        $this->load->language('extension/moysklad_sync/module/moysklad_sync');
+        $json = [];
+
+        if (!$this->user->hasPermission('modify', 'extension/moysklad_sync/module/moysklad_sync')) {
+            $json['error'] = $this->language->get('error_permission');
+            $this->sendJson($json);
+            return;
+        }
+
+        $this->loadTaskModel();
+        $task = $this->model_extension_moysklad_sync_module_moysklad_task->stopActiveTask();
+
+        if (!$task) {
+            $json['error'] = $this->language->get('error_no_active_task');
+        } else {
+            $json['success'] = $this->language->get('text_task_stopped');
+            $json['task'] = $this->formatTask($task);
+            $json['logs'] = $this->formatLogs($this->model_extension_moysklad_sync_module_moysklad_task->getRecentLogs(20));
+        }
+
+        $this->sendJson($json);
+    }
+
+
+    /**
+     * Мягко обновляет служебные таблицы при открытии страницы модуля.
+     *
+     * Это исправляет сценарий, когда модуль был установлен ранней сборкой,
+     * а новая сборка добавила служебные колонки вроде last_seen_task_id.
+     * Ошибку миграции не скрываем полностью: записываем ее в лог OpenCart,
+     * но страницу все равно показываем, чтобы администратор мог увидеть настройки.
+     */
+    private function ensureModuleSchemaOnPageLoad(): void {
+        try {
+            $this->load->model('extension/moysklad_sync/module/moysklad_sync');
+            $this->model_extension_moysklad_sync_module_moysklad_sync->ensureSchema();
+        } catch (\Throwable $e) {
+            $this->log->write('Moysklad Sync schema migration error: ' . $e->getMessage());
+        }
+    }
+
+    public function install(): void {
+        $this->load->model('extension/moysklad_sync/module/moysklad_sync');
+        $this->model_extension_moysklad_sync_module_moysklad_sync->install();
+
+        $this->load->model('setting/setting');
+        $this->model_setting_setting->editSetting(self::SETTING_CODE, $this->getDefaultSettings());
+
+        // Сразу выдаем текущей группе администратора права на основной маршрут.
+        // Пользователь все равно может вручную проверить права в User Groups,
+        // но после установки модуль не должен ломать AJAX из-за отсутствия access/modify.
+        $this->grantCurrentAdminPermissions();
+    }
+
+    public function uninstall(): void {
+        $this->load->model('extension/moysklad_sync/module/moysklad_sync');
+        $this->model_extension_moysklad_sync_module_moysklad_sync->uninstall();
+
+        $this->load->model('setting/setting');
+        $this->model_setting_setting->deleteSetting(self::SETTING_CODE);
+    }
+
+    private function grantCurrentAdminPermissions(): void {
+        try {
+            if (!isset($this->user) || !method_exists($this->user, 'getGroupId')) {
+                return;
+            }
+
+            $this->load->model('user/user_group');
+            $user_group_id = (int)$this->user->getGroupId();
+            $route = 'extension/moysklad_sync/module/moysklad_sync';
+
+            $this->model_user_user_group->addPermission($user_group_id, 'access', $route);
+            $this->model_user_user_group->addPermission($user_group_id, 'modify', $route);
+        } catch (\Throwable $e) {
+            // Не прерываем установку, если конкретная сборка ocStore отличается
+            // моделью прав. В этом случае права можно выдать вручную.
+        }
+    }
+
+    private function buildPageData(): array {
+        $data = [];
+
+        $data['breadcrumbs'] = [];
+        $data['breadcrumbs'][] = [
+            'text' => $this->language->get('text_home'),
+            'href' => $this->url->link('common/dashboard', 'user_token=' . $this->session->data['user_token'])
+        ];
+        $data['breadcrumbs'][] = [
+            'text' => $this->language->get('text_extension'),
+            'href' => $this->url->link('marketplace/extension', 'user_token=' . $this->session->data['user_token'] . '&type=module')
+        ];
+        $data['breadcrumbs'][] = [
+            'text' => $this->language->get('heading_title'),
+            'href' => $this->url->link('extension/moysklad_sync/module/moysklad_sync', 'user_token=' . $this->session->data['user_token'])
+        ];
+
+        // AJAX-ссылки ведут на тот же основной route, но с внутренним action.
+        // Это защищает от HTML-ответов permission/login page там, где JS ждет JSON.
+        $base_query = 'user_token=' . $this->session->data['user_token'];
+        $data['save'] = $this->url->link('extension/moysklad_sync/module/moysklad_sync', $base_query . '&ajax_action=save');
+        $data['test_connection'] = $this->url->link('extension/moysklad_sync/module/moysklad_sync', $base_query . '&ajax_action=test_connection');
+        $data['load_dictionaries'] = $this->url->link('extension/moysklad_sync/module/moysklad_sync', $base_query . '&ajax_action=load_dictionaries');
+        $data['start_import'] = $this->url->link('extension/moysklad_sync/module/moysklad_sync', $base_query . '&ajax_action=start_import');
+        $data['start_stock_update'] = $this->url->link('extension/moysklad_sync/module/moysklad_sync', $base_query . '&ajax_action=start_stock_update');
+        $data['start_image_sync'] = $this->url->link('extension/moysklad_sync/module/moysklad_sync', $base_query . '&ajax_action=start_image_sync');
+        $data['run_task_step'] = $this->url->link('extension/moysklad_sync/module/moysklad_sync', $base_query . '&ajax_action=run_task_step');
+        $data['get_task_status'] = $this->url->link('extension/moysklad_sync/module/moysklad_sync', $base_query . '&ajax_action=get_task_status');
+        $data['stop_task'] = $this->url->link('extension/moysklad_sync/module/moysklad_sync', $base_query . '&ajax_action=stop_task');
+        $data['back'] = $this->url->link('marketplace/extension', 'user_token=' . $this->session->data['user_token'] . '&type=module');
+
+        $defaults = $this->getDefaultSettings();
+
+        foreach ($defaults as $key => $default) {
+            if ($key === 'module_moysklad_sync_api_token') {
+                $data[$key] = '';
+                $data['module_moysklad_sync_api_token_set'] = (bool)$this->config->get($key);
+                continue;
+            }
+
+            $value = $this->config->get($key);
+            $data[$key] = $value !== null ? $value : $default;
+        }
+
+        $data['action_options'] = [
+            'none' => $this->language->get('text_action_none'),
+            'disable' => $this->language->get('text_action_disable'),
+            'delete' => $this->language->get('text_action_delete')
+        ];
+
+        $data['log_level_options'] = [
+            'warning' => $this->language->get('text_log_error_warning'),
+            'info' => $this->language->get('text_log_info'),
+            'debug' => $this->language->get('text_log_debug')
+        ];
+
+        $data['seo_mode_options'] = [
+            'new_only' => $this->language->get('text_seo_new_only')
+        ];
+
+        return $data;
+    }
+
+
+    private function startTask(string $type): void {
+        $this->load->language('extension/moysklad_sync/module/moysklad_sync');
+        $json = [];
+
+        if (!$this->user->hasPermission('modify', 'extension/moysklad_sync/module/moysklad_sync')) {
+            $json['error'] = $this->language->get('error_permission');
+            $this->sendJson($json);
+            return;
+        }
+
+        try {
+            $this->assertTaskCanStart($type);
+            $this->loadTaskModel();
+
+            $settings = $this->getCurrentSettings();
+            $limit = $this->getLimitForTaskType($type, $settings);
+
+            $task = $this->model_extension_moysklad_sync_module_moysklad_task->createTask($type, $limit, [
+                'settings_snapshot' => $this->getSafeSettingsSnapshot($settings)
+            ]);
+
+            $json['success'] = $this->language->get('text_task_created');
+            $json['task'] = $this->formatTask($task);
+            $json['logs'] = $this->formatLogs($this->model_extension_moysklad_sync_module_moysklad_task->getRecentLogs(20));
+        } catch (\Throwable $e) {
+            $json['error'] = $e->getMessage();
+        }
+
+        $this->sendJson($json);
+    }
+
+    private function assertTaskCanStart(string $type): void {
+        if (!(int)$this->config->get('module_moysklad_sync_status')) {
+            throw new \RuntimeException($this->language->get('error_module_disabled'));
+        }
+
+        if (!trim((string)$this->config->get('module_moysklad_sync_api_token'))) {
+            throw new \RuntimeException($this->language->get('error_api_token_required'));
+        }
+
+        // Для импорта и остатков уже нужен выбранный склад: импорт тоже будет
+        // обновлять остаток/статус, а значит должен знать источник остатков.
+        if (in_array($type, ['import', 'stock'], true) && !trim((string)$this->config->get('module_moysklad_sync_warehouse_id'))) {
+            throw new \RuntimeException($this->language->get('error_warehouse_required'));
+        }
+
+        if ($type === 'import' && !trim((string)$this->config->get('module_moysklad_sync_price_type_id'))) {
+            throw new \RuntimeException($this->language->get('error_price_type_required'));
+        }
+    }
+
+    private function getLimitForTaskType(string $type, array $settings): int {
+        return match ($type) {
+            // Импорт теперь идет от отчета остатков выбранного склада, поэтому
+            // размер пакета берем из настроек товаров, а не категорий.
+            'import' => (int)$settings['module_moysklad_sync_product_batch_size'],
+            'stock' => (int)$settings['module_moysklad_sync_stock_batch_size'],
+            'images' => (int)$settings['module_moysklad_sync_image_batch_size'],
+            default => 20
+        };
+    }
+
+    private function getCurrentSettings(): array {
+        $defaults = $this->getDefaultSettings();
+        $settings = [];
+
+        foreach ($defaults as $key => $default) {
+            $value = $this->config->get($key);
+            $settings[$key] = $value !== null ? $value : $default;
+        }
+
+        return $settings;
+    }
+
+    private function getSafeSettingsSnapshot(array $settings): array {
+        unset($settings['module_moysklad_sync_api_token']);
+
+        return $settings;
+    }
+
+    private function loadTaskModel(): void {
+        $this->load->model('extension/moysklad_sync/module/moysklad_task');
+    }
+
+    private function loadCategoryModel(): void {
+        $this->load->model('extension/moysklad_sync/module/moysklad_category');
+    }
+
+    private function loadProductModel(): void {
+        $this->load->model('extension/moysklad_sync/module/moysklad_product');
+    }
+
+    private function loadImageModel(): void {
+        $this->load->model('extension/moysklad_sync/module/moysklad_image');
+    }
+
+    private function formatTask(array $task): array {
+        if (!$task) {
+            return [];
+        }
+
+        return [
+            'task_id' => (int)$task['task_id'],
+            'task_type' => (string)$task['task_type'],
+            'task_type_title' => $this->getTaskTypeTitle((string)$task['task_type']),
+            'status' => (string)$task['status'],
+            'status_title' => $this->getTaskStatusTitle((string)$task['status']),
+            'current_step' => (string)$task['current_step'],
+            'current_step_title' => $this->getTaskStepTitle((string)$task['current_step']),
+            'processed_items' => (int)$task['processed_items'],
+            'created_items' => (int)$task['created_items'],
+            'updated_items' => (int)$task['updated_items'],
+            'skipped_items' => (int)$task['skipped_items'],
+            'deleted_items' => (int)$task['deleted_items'],
+            'disabled_items' => (int)$task['disabled_items'],
+            'error_items' => (int)$task['error_items'],
+            'started_at' => (string)($task['started_at'] ?? ''),
+            'finished_at' => (string)($task['finished_at'] ?? ''),
+            'last_error' => (string)($task['last_error'] ?? ''),
+            'is_active' => in_array((string)$task['status'], ['new', 'running', 'paused'], true)
+        ];
+    }
+
+    private function formatLogs(array $logs): array {
+        $result = [];
+
+        foreach ($logs as $log) {
+            $result[] = [
+                'created_at' => (string)$log['created_at'],
+                'level' => (string)$log['level'],
+                'entity_type' => (string)($log['entity_type'] ?? ''),
+                'message' => (string)$log['message']
+            ];
+        }
+
+        return $result;
+    }
+
+    private function getTaskTypeTitle(string $type): string {
+        return match ($type) {
+            'import' => $this->language->get('text_task_type_import'),
+            'stock' => $this->language->get('text_task_type_stock'),
+            'images' => $this->language->get('text_task_type_images'),
+            default => $type
+        };
+    }
+
+    private function getTaskStatusTitle(string $status): string {
+        return match ($status) {
+            'new' => $this->language->get('text_task_status_new'),
+            'running' => $this->language->get('text_task_status_running'),
+            'paused' => $this->language->get('text_task_status_paused'),
+            'finished' => $this->language->get('text_task_status_finished'),
+            'finished_with_errors' => $this->language->get('text_task_status_finished_with_errors'),
+            'failed' => $this->language->get('text_task_status_failed'),
+            'stopped' => $this->language->get('text_task_status_stopped'),
+            default => $status
+        };
+    }
+
+    private function getTaskStepTitle(string $step): string {
+        return match ($step) {
+            'init' => $this->language->get('text_step_init'),
+            'sync_categories' => $this->language->get('text_step_sync_categories'),
+            'sync_products' => $this->language->get('text_step_sync_products'),
+            'rebuild_category_tree' => $this->language->get('text_step_rebuild_category_tree'),
+            'process_missing_categories' => $this->language->get('text_step_missing_categories'),
+            'process_missing_products' => $this->language->get('text_step_missing_products'),
+            'sync_stock' => $this->language->get('text_step_sync_stock'),
+            'sync_images' => $this->language->get('text_step_sync_images'),
+            'finish' => $this->language->get('text_step_finish'),
+            default => $step
+        };
+    }
+
+    private function normaliseSettings(array $post): array {
+        $settings = $this->getDefaultSettings();
+
+        $existingToken = (string)$this->config->get('module_moysklad_sync_api_token');
+        $postedToken = trim((string)($post['module_moysklad_sync_api_token'] ?? ''));
+
+        $settings['module_moysklad_sync_status'] = !empty($post['module_moysklad_sync_status']) ? 1 : 0;
+        $settings['module_moysklad_sync_api_token'] = $postedToken !== '' ? $postedToken : $existingToken;
+        $settings['module_moysklad_sync_warehouse_id'] = trim((string)($post['module_moysklad_sync_warehouse_id'] ?? ''));
+        $settings['module_moysklad_sync_warehouse_name'] = trim((string)($post['module_moysklad_sync_warehouse_name'] ?? ''));
+        $settings['module_moysklad_sync_price_type_id'] = trim((string)($post['module_moysklad_sync_price_type_id'] ?? ''));
+        $settings['module_moysklad_sync_price_type_name'] = trim((string)($post['module_moysklad_sync_price_type_name'] ?? ''));
+
+        $settings['module_moysklad_sync_missing_product_action'] = $this->normaliseEnum(
+            $post['module_moysklad_sync_missing_product_action'] ?? 'disable',
+            ['none', 'disable', 'delete'],
+            'disable'
+        );
+
+        $settings['module_moysklad_sync_missing_category_action'] = $this->normaliseEnum(
+            $post['module_moysklad_sync_missing_category_action'] ?? 'disable',
+            ['none', 'disable', 'delete'],
+            'disable'
+        );
+
+        $settings['module_moysklad_sync_zero_stock_action'] = $this->normaliseEnum(
+            $post['module_moysklad_sync_zero_stock_action'] ?? 'disable',
+            ['none', 'disable', 'delete'],
+            'disable'
+        );
+
+        $settings['module_moysklad_sync_seo_mode'] = $this->normaliseEnum(
+            $post['module_moysklad_sync_seo_mode'] ?? 'new_only',
+            ['new_only'],
+            'new_only'
+        );
+
+        $settings['module_moysklad_sync_log_level'] = $this->normaliseEnum(
+            $post['module_moysklad_sync_log_level'] ?? 'warning',
+            ['warning', 'info', 'debug'],
+            'warning'
+        );
+
+        $settings['module_moysklad_sync_clear_empty_description'] = !empty($post['module_moysklad_sync_clear_empty_description']) ? 1 : 0;
+
+        $settings['module_moysklad_sync_category_batch_size'] = max(1, (int)($post['module_moysklad_sync_category_batch_size'] ?? 30));
+        $settings['module_moysklad_sync_product_batch_size'] = max(1, (int)($post['module_moysklad_sync_product_batch_size'] ?? 20));
+        $settings['module_moysklad_sync_stock_batch_size'] = max(1, (int)($post['module_moysklad_sync_stock_batch_size'] ?? 50));
+        $settings['module_moysklad_sync_image_batch_size'] = max(1, (int)($post['module_moysklad_sync_image_batch_size'] ?? 3));
+        $settings['module_moysklad_sync_max_images_per_product'] = max(1, (int)($post['module_moysklad_sync_max_images_per_product'] ?? 5));
+        $settings['module_moysklad_sync_max_image_bytes'] = max(1048576, (int)($post['module_moysklad_sync_max_image_bytes'] ?? 10485760));
+
+        return $settings;
+    }
+
+    private function validateSettings(array $settings): bool {
+        if ($settings['module_moysklad_sync_category_batch_size'] < 1 || $settings['module_moysklad_sync_category_batch_size'] > 500) {
+            $this->error['category_batch'] = $this->language->get('error_batch_category');
+        }
+
+        if ($settings['module_moysklad_sync_product_batch_size'] < 1 || $settings['module_moysklad_sync_product_batch_size'] > 200) {
+            $this->error['product_batch'] = $this->language->get('error_batch_product');
+        }
+
+        if ($settings['module_moysklad_sync_stock_batch_size'] < 1 || $settings['module_moysklad_sync_stock_batch_size'] > 500) {
+            $this->error['stock_batch'] = $this->language->get('error_batch_stock');
+        }
+
+        if ($settings['module_moysklad_sync_image_batch_size'] < 1 || $settings['module_moysklad_sync_image_batch_size'] > 50) {
+            $this->error['image_batch'] = $this->language->get('error_batch_image');
+        }
+
+        if ($settings['module_moysklad_sync_max_images_per_product'] < 1 || $settings['module_moysklad_sync_max_images_per_product'] > 20) {
+            $this->error['max_images_per_product'] = $this->language->get('error_max_images_per_product');
+        }
+
+        if ($settings['module_moysklad_sync_max_image_bytes'] < 1048576 || $settings['module_moysklad_sync_max_image_bytes'] > 31457280) {
+            $this->error['max_image_bytes'] = $this->language->get('error_max_image_bytes');
+        }
+
+        return !$this->error;
+    }
+
+    private function normaliseEnum(mixed $value, array $allowed, string $default): string {
+        $value = (string)$value;
+
+        return in_array($value, $allowed, true) ? $value : $default;
+    }
+
+    private function getDefaultSettings(): array {
+        return [
+            'module_moysklad_sync_status' => 0,
+            'module_moysklad_sync_api_token' => '',
+            'module_moysklad_sync_warehouse_id' => '',
+            'module_moysklad_sync_warehouse_name' => '',
+            'module_moysklad_sync_price_type_id' => '',
+            'module_moysklad_sync_price_type_name' => '',
+            'module_moysklad_sync_missing_product_action' => 'disable',
+            'module_moysklad_sync_missing_category_action' => 'disable',
+            'module_moysklad_sync_zero_stock_action' => 'disable',
+            'module_moysklad_sync_seo_mode' => 'new_only',
+            'module_moysklad_sync_clear_empty_description' => 1,
+            'module_moysklad_sync_category_batch_size' => 30,
+            'module_moysklad_sync_product_batch_size' => 20,
+            'module_moysklad_sync_stock_batch_size' => 50,
+            'module_moysklad_sync_image_batch_size' => 3,
+            'module_moysklad_sync_max_images_per_product' => 5,
+            'module_moysklad_sync_max_image_bytes' => 10485760,
+            'module_moysklad_sync_log_level' => 'warning'
+        ];
+    }
+
+    private function createMoyskladClientFromRequest(): MoyskladClient {
+        $this->loadMoyskladLibraries();
+
+        $postedToken = trim((string)($this->request->post['module_moysklad_sync_api_token'] ?? ''));
+        $token = $postedToken !== '' ? $postedToken : (string)$this->config->get('module_moysklad_sync_api_token');
+
+        $http = new HttpClient($token);
+
+        return new MoyskladClient($http);
+    }
+
+    private function createMoyskladClientFromSettings(array $settings): MoyskladClient {
+        $this->loadMoyskladLibraries();
+
+        $http = new HttpClient((string)($settings['module_moysklad_sync_api_token'] ?? ''));
+
+        return new MoyskladClient($http);
+    }
+
+    private function loadMoyskladLibraries(): void {
+        // В OpenCart/ocStore 4 расширение распаковывается не в корень сайта,
+        // а в каталог extension/moysklad_sync/. Поэтому свои сервисные классы
+        // подключаем относительно DIR_EXTENSION, а не DIR_SYSTEM.
+        // Это ключевой момент: иначе модуль может отображаться, но падать при
+        // проверке подключения или запуске синхронизации.
+        $extension_dir = defined('DIR_EXTENSION') ? DIR_EXTENSION : dirname(DIR_APPLICATION) . '/extension/';
+        $library_path = $extension_dir . 'moysklad_sync/system/library/moysklad_sync/';
+
+        require_once $library_path . 'ApiException.php';
+        require_once $library_path . 'HttpClient.php';
+        require_once $library_path . 'MoyskladClient.php';
+        require_once $library_path . 'CategorySyncService.php';
+        require_once $library_path . 'ProductSyncService.php';
+        require_once $library_path . 'StockSyncService.php';
+        require_once $library_path . 'ImageSyncService.php';
+        require_once $library_path . 'TaskRunner.php';
+    }
+
+    private function formatApiError(ApiException $e): string {
+        $parts = [];
+
+        if ($e->getHttpStatus() > 0) {
+            $parts[] = 'HTTP ' . $e->getHttpStatus();
+        }
+
+        if ($e->getApiCode()) {
+            $parts[] = 'код ' . $e->getApiCode();
+        }
+
+        $prefix = $parts ? '[' . implode(', ', $parts) . '] ' : '';
+
+        return $prefix . $e->getMessage();
+    }
+
+    private function sendJson(array $json): void {
+        $this->response->addHeader('Content-Type: application/json');
+        $this->response->setOutput(json_encode($json, JSON_UNESCAPED_UNICODE));
+    }
+}

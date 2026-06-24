@@ -1,0 +1,546 @@
+{{ header }}{{ column_left }}
+<div id="content">
+  <div class="page-header">
+    <div class="container-fluid">
+      <div class="float-end">
+        <button type="submit" form="form-module" data-bs-toggle="tooltip" title="{{ button_save }}" class="btn btn-primary"><i class="fa-solid fa-save"></i></button>
+        <a href="{{ back }}" data-bs-toggle="tooltip" title="{{ button_back }}" class="btn btn-light"><i class="fa-solid fa-reply"></i></a>
+      </div>
+      <h1>{{ heading_title }}</h1>
+      <ol class="breadcrumb">
+        {% for breadcrumb in breadcrumbs %}
+          <li class="breadcrumb-item"><a href="{{ breadcrumb.href }}">{{ breadcrumb.text }}</a></li>
+        {% endfor %}
+      </ol>
+    </div>
+  </div>
+
+  <div class="container-fluid">
+    <div id="moysklad-alerts"></div>
+
+    <div class="card">
+      <div class="card-header"><i class="fa-solid fa-gear"></i> {{ text_edit }}</div>
+      <div class="card-body">
+        <ul class="nav nav-tabs" id="moysklad-tabs" role="tablist">
+          <li class="nav-item" role="presentation"><button class="nav-link active" id="tab-settings" data-bs-toggle="tab" data-bs-target="#pane-settings" type="button" role="tab">{{ text_tab_settings }}</button></li>
+          <li class="nav-item" role="presentation"><button class="nav-link" id="tab-sync" data-bs-toggle="tab" data-bs-target="#pane-sync" type="button" role="tab">{{ text_tab_sync }}</button></li>
+          <li class="nav-item" role="presentation"><button class="nav-link" id="tab-logs" data-bs-toggle="tab" data-bs-target="#pane-logs" type="button" role="tab">{{ text_tab_logs }}</button></li>
+        </ul>
+
+        <div class="tab-content pt-3">
+          <div class="tab-pane fade show active" id="pane-settings" role="tabpanel">
+            <form id="form-module" action="{{ save }}" method="post" data-oc-toggle="ajax">
+              <fieldset>
+                <legend>{{ text_tab_settings }}</legend>
+
+                <div class="row mb-3">
+                  <label class="col-sm-3 col-form-label" for="input-status">{{ entry_status }}</label>
+                  <div class="col-sm-9">
+                    <div class="form-check form-switch form-switch-lg">
+                      <input type="hidden" name="module_moysklad_sync_status" value="0"/>
+                      <input type="checkbox" name="module_moysklad_sync_status" value="1" id="input-status" class="form-check-input"{% if module_moysklad_sync_status %} checked{% endif %}/>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="row mb-3">
+                  <label class="col-sm-3 col-form-label" for="input-api-token">{{ entry_api_token }}</label>
+                  <div class="col-sm-9">
+                    <input type="password" name="module_moysklad_sync_api_token" value="" placeholder="{% if module_moysklad_sync_api_token_set %}••••••••••••••••{% endif %}" id="input-api-token" class="form-control" autocomplete="new-password"/>
+                    <div class="form-text">{{ help_api_token }}</div>
+                    <div class="mt-2 d-flex flex-wrap gap-2">
+                      <button type="button" id="button-test-connection" class="btn btn-light"><i class="fa-solid fa-plug-circle-check"></i> {{ button_test_connection }}</button>
+                      <button type="button" id="button-load-dictionaries" class="btn btn-light"><i class="fa-solid fa-cloud-arrow-down"></i> {{ button_load_dictionaries }}</button>
+                    </div>
+                    <div class="form-text">{{ help_dictionaries }}</div>
+                  </div>
+                </div>
+
+                <div class="row mb-3">
+                  <label class="col-sm-3 col-form-label" for="input-warehouse-id">{{ entry_warehouse_id }}</label>
+                  <div class="col-sm-9">
+                    <input type="hidden" name="module_moysklad_sync_warehouse_name" id="input-warehouse-name" value="{{ module_moysklad_sync_warehouse_name }}"/>
+                    <select name="module_moysklad_sync_warehouse_id" id="input-warehouse-id" class="form-select">
+                      <option value="">{{ text_select_warehouse }}</option>
+                      {% if module_moysklad_sync_warehouse_id %}
+                        <option value="{{ module_moysklad_sync_warehouse_id }}" selected>{{ module_moysklad_sync_warehouse_name ?: text_current_value ~ ': ' ~ module_moysklad_sync_warehouse_id }}</option>
+                      {% endif %}
+                    </select>
+                    <div class="form-text">{{ help_warehouse_id }}</div>
+                  </div>
+                </div>
+
+                <div class="row mb-3">
+                  <label class="col-sm-3 col-form-label" for="input-price-type-id">{{ entry_price_type_id }}</label>
+                  <div class="col-sm-9">
+                    <input type="hidden" name="module_moysklad_sync_price_type_name" id="input-price-type-name" value="{{ module_moysklad_sync_price_type_name }}"/>
+                    <select name="module_moysklad_sync_price_type_id" id="input-price-type-id" class="form-select">
+                      <option value="">{{ text_select_price_type }}</option>
+                      {% if module_moysklad_sync_price_type_id %}
+                        <option value="{{ module_moysklad_sync_price_type_id }}" selected>{{ module_moysklad_sync_price_type_name ?: text_current_value ~ ': ' ~ module_moysklad_sync_price_type_id }}</option>
+                      {% endif %}
+                    </select>
+                    <div class="form-text">{{ help_price_type_id }}</div>
+                  </div>
+                </div>
+
+                <div class="row mb-3">
+                  <label class="col-sm-3 col-form-label" for="input-missing-product-action">{{ entry_missing_product_action }}</label>
+                  <div class="col-sm-9">
+                    <select name="module_moysklad_sync_missing_product_action" id="input-missing-product-action" class="form-select">
+                      {% for value, title in action_options %}
+                        <option value="{{ value }}"{% if value == module_moysklad_sync_missing_product_action %} selected{% endif %}>{{ title }}</option>
+                      {% endfor %}
+                    </select>
+                  </div>
+                </div>
+
+                <div class="row mb-3">
+                  <label class="col-sm-3 col-form-label" for="input-missing-category-action">{{ entry_missing_category_action }}</label>
+                  <div class="col-sm-9">
+                    <select name="module_moysklad_sync_missing_category_action" id="input-missing-category-action" class="form-select">
+                      {% for value, title in action_options %}
+                        <option value="{{ value }}"{% if value == module_moysklad_sync_missing_category_action %} selected{% endif %}>{{ title }}</option>
+                      {% endfor %}
+                    </select>
+                  </div>
+                </div>
+
+                <div class="row mb-3">
+                  <label class="col-sm-3 col-form-label" for="input-zero-stock-action">{{ entry_zero_stock_action }}</label>
+                  <div class="col-sm-9">
+                    <select name="module_moysklad_sync_zero_stock_action" id="input-zero-stock-action" class="form-select">
+                      {% for value, title in action_options %}
+                        <option value="{{ value }}"{% if value == module_moysklad_sync_zero_stock_action %} selected{% endif %}>{{ title }}</option>
+                      {% endfor %}
+                    </select>
+                  </div>
+                </div>
+
+                <div class="row mb-3">
+                  <label class="col-sm-3 col-form-label" for="input-seo-mode">{{ entry_seo_mode }}</label>
+                  <div class="col-sm-9">
+                    <select name="module_moysklad_sync_seo_mode" id="input-seo-mode" class="form-select">
+                      {% for value, title in seo_mode_options %}
+                        <option value="{{ value }}"{% if value == module_moysklad_sync_seo_mode %} selected{% endif %}>{{ title }}</option>
+                      {% endfor %}
+                    </select>
+                  </div>
+                </div>
+
+                <div class="row mb-3">
+                  <label class="col-sm-3 col-form-label" for="input-clear-empty-description">{{ entry_clear_empty_description }}</label>
+                  <div class="col-sm-9">
+                    <div class="form-check form-switch form-switch-lg">
+                      <input type="hidden" name="module_moysklad_sync_clear_empty_description" value="0"/>
+                      <input type="checkbox" name="module_moysklad_sync_clear_empty_description" value="1" id="input-clear-empty-description" class="form-check-input"{% if module_moysklad_sync_clear_empty_description %} checked{% endif %}/>
+                    </div>
+                  </div>
+                </div>
+
+                <hr/>
+
+                <div class="row mb-3">
+                  <label class="col-sm-3 col-form-label" for="input-category-batch">{{ entry_category_batch_size }}</label>
+                  <div class="col-sm-9">
+                    <input type="number" min="1" max="500" name="module_moysklad_sync_category_batch_size" value="{{ module_moysklad_sync_category_batch_size }}" id="input-category-batch" class="form-control"/>
+                  </div>
+                </div>
+
+                <div class="row mb-3">
+                  <label class="col-sm-3 col-form-label" for="input-product-batch">{{ entry_product_batch_size }}</label>
+                  <div class="col-sm-9">
+                    <input type="number" min="1" max="200" name="module_moysklad_sync_product_batch_size" value="{{ module_moysklad_sync_product_batch_size }}" id="input-product-batch" class="form-control"/>
+                  </div>
+                </div>
+
+                <div class="row mb-3">
+                  <label class="col-sm-3 col-form-label" for="input-stock-batch">{{ entry_stock_batch_size }}</label>
+                  <div class="col-sm-9">
+                    <input type="number" min="1" max="500" name="module_moysklad_sync_stock_batch_size" value="{{ module_moysklad_sync_stock_batch_size }}" id="input-stock-batch" class="form-control"/>
+                  </div>
+                </div>
+
+                <div class="row mb-3">
+                  <label class="col-sm-3 col-form-label" for="input-image-batch">{{ entry_image_batch_size }}</label>
+                  <div class="col-sm-9">
+                    <input type="number" min="1" max="50" name="module_moysklad_sync_image_batch_size" value="{{ module_moysklad_sync_image_batch_size }}" id="input-image-batch" class="form-control"/>
+                    <div class="form-text">{{ help_batches }}</div>
+                  </div>
+                </div>
+
+                <div class="row mb-3">
+                  <label class="col-sm-3 col-form-label" for="input-max-images-per-product">{{ entry_max_images_per_product }}</label>
+                  <div class="col-sm-9">
+                    <input type="number" min="1" max="20" name="module_moysklad_sync_max_images_per_product" value="{{ module_moysklad_sync_max_images_per_product }}" id="input-max-images-per-product" class="form-control"/>
+                    <div class="form-text">{{ help_images_limits }}</div>
+                  </div>
+                </div>
+
+                <div class="row mb-3">
+                  <label class="col-sm-3 col-form-label" for="input-max-image-bytes">{{ entry_max_image_bytes }}</label>
+                  <div class="col-sm-9">
+                    <input type="number" min="1048576" max="31457280" name="module_moysklad_sync_max_image_bytes" value="{{ module_moysklad_sync_max_image_bytes }}" id="input-max-image-bytes" class="form-control"/>
+                  </div>
+                </div>
+
+                <div class="row mb-3">
+                  <label class="col-sm-3 col-form-label" for="input-log-level">{{ entry_log_level }}</label>
+                  <div class="col-sm-9">
+                    <select name="module_moysklad_sync_log_level" id="input-log-level" class="form-select">
+                      {% for value, title in log_level_options %}
+                        <option value="{{ value }}"{% if value == module_moysklad_sync_log_level %} selected{% endif %}>{{ title }}</option>
+                      {% endfor %}
+                    </select>
+                  </div>
+                </div>
+              </fieldset>
+            </form>
+          </div>
+
+          <div class="tab-pane fade" id="pane-sync" role="tabpanel">
+            <div class="alert alert-info"><i class="fa-solid fa-circle-info"></i> {{ text_stage3_notice }}</div>
+
+            <div class="d-flex flex-wrap gap-2 mb-3">
+              <button type="button" class="btn btn-primary" id="button-start-import"><i class="fa-solid fa-download"></i> {{ button_import }}</button>
+              <button type="button" class="btn btn-warning" id="button-start-stock"><i class="fa-solid fa-boxes-stacked"></i> {{ button_stock }}</button>
+              <button type="button" class="btn btn-success" id="button-start-images"><i class="fa-solid fa-image"></i> {{ button_images }}</button>
+              <button type="button" class="btn btn-danger" id="button-stop-task"><i class="fa-solid fa-stop"></i> {{ button_stop_task }}</button>
+              <button type="button" class="btn btn-light" id="button-refresh-status"><i class="fa-solid fa-rotate"></i> {{ button_refresh_status }}</button>
+              <button type="button" class="btn btn-light" id="button-test-connection-sync"><i class="fa-solid fa-plug-circle-check"></i> {{ button_test_connection }}</button>
+            </div>
+
+            <div class="card border-secondary">
+              <div class="card-header"><i class="fa-solid fa-list-check"></i> {{ text_task_panel_title }}</div>
+              <div class="card-body" id="task-panel">
+                <div class="alert alert-secondary mb-0">{{ text_task_panel_empty }}</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="tab-pane fade" id="pane-logs" role="tabpanel">
+            <h3>{{ text_logs_latest }}</h3>
+            <div id="logs-panel" class="table-responsive">
+              <div class="alert alert-secondary">{{ text_no_logs }}</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  const form = document.getElementById('form-module');
+  const alerts = document.getElementById('moysklad-alerts');
+  const testButtons = [document.getElementById('button-test-connection'), document.getElementById('button-test-connection-sync')].filter(Boolean);
+  const loadButton = document.getElementById('button-load-dictionaries');
+  const warehouseSelect = document.getElementById('input-warehouse-id');
+  const warehouseName = document.getElementById('input-warehouse-name');
+  const priceTypeSelect = document.getElementById('input-price-type-id');
+  const priceTypeName = document.getElementById('input-price-type-name');
+  const startImportButton = document.getElementById('button-start-import');
+  const startStockButton = document.getElementById('button-start-stock');
+  const startImagesButton = document.getElementById('button-start-images');
+  const stopTaskButton = document.getElementById('button-stop-task');
+  const refreshStatusButton = document.getElementById('button-refresh-status');
+  const taskPanel = document.getElementById('task-panel');
+  const logsPanel = document.getElementById('logs-panel');
+  let taskLoopRunning = false;
+
+  // Важно: AJAX-URL собираем на стороне браузера из текущего URL страницы.
+  // Почему не подставляем готовые ссылки из PHP? В OpenCart url->link() часто
+  // возвращает ссылки с HTML-сущностями (&amp;). Внутри JavaScript такая строка
+  // может уйти на сервер как amp;user_token вместо user_token, и админка отдаст
+  // страницу Авторизация вместо JSON. Current location уже содержит реальный
+  // user_token текущей сессии без HTML-экранирования.
+  function ajaxUrl(action) {
+    const url = new URL(window.location.href);
+    url.searchParams.set('ajax_action', action);
+    return url.toString();
+  }
+
+  function showAlert(type, message) {
+    alerts.innerHTML = '<div class="alert alert-' + type + ' alert-dismissible">'
+      + '<i class="fa-solid fa-circle-info"></i> ' + escapeHtml(message)
+      + '<button type="button" class="btn-close" data-bs-dismiss="alert"></button>'
+      + '</div>';
+  }
+
+  function escapeHtml(value) {
+    return String(value).replace(/[&<>"']/g, function (char) {
+      return {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;'}[char];
+    });
+  }
+
+  function setLoading(button, isLoading) {
+    if (!button) {
+      return;
+    }
+
+    if (isLoading) {
+      button.dataset.originalText = button.innerHTML;
+      button.disabled = true;
+      button.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> {{ text_loading|e('js') }}';
+    } else {
+      button.disabled = false;
+      button.innerHTML = button.dataset.originalText || button.innerHTML;
+    }
+  }
+
+  async function post(url) {
+    const response = await fetch(url, {
+      method: 'POST',
+      credentials: 'same-origin',
+      body: new FormData(form)
+    });
+
+    // Не вызываем response.json() напрямую. Если сервер вернул HTML
+    // (например, страницу логина, отказ прав или PHP-ошибку), браузер иначе покажет
+    // непонятное Unexpected token '<'. Так мы даем администратору нормальную подсказку.
+    const text = await response.text();
+
+    try {
+      return JSON.parse(text);
+    } catch (e) {
+      console.error('Moysklad Sync: non-JSON response', text);
+      return {
+        error: 'Сервер вернул не JSON. Чаще всего это страница авторизации, отказ прав или PHP-ошибка. Проверьте system/storage/logs/error.log. Начало ответа: ' + text.substring(0, 120)
+      };
+    }
+  }
+
+  async function testConnection(button) {
+    setLoading(button, true);
+
+    try {
+      const json = await post(ajaxUrl('test_connection'));
+
+      if (json.error) {
+        showAlert('danger', json.error);
+      } else {
+        const company = json.company_name ? ' ' + json.company_name : '';
+        showAlert('success', json.success + company);
+      }
+    } catch (error) {
+      showAlert('danger', error.message);
+    } finally {
+      setLoading(button, false);
+    }
+  }
+
+  async function loadDictionaries() {
+    setLoading(loadButton, true);
+
+    try {
+      const json = await post(ajaxUrl('load_dictionaries'));
+
+      if (json.error) {
+        showAlert('danger', json.error);
+        return;
+      }
+
+      fillSelect(warehouseSelect, warehouseName, json.warehouses || [], '{{ text_select_warehouse|e('js') }}');
+      fillSelect(priceTypeSelect, priceTypeName, json.price_types || [], '{{ text_select_price_type|e('js') }}');
+      showAlert('success', json.success);
+    } catch (error) {
+      showAlert('danger', error.message);
+    } finally {
+      setLoading(loadButton, false);
+    }
+  }
+
+  function fillSelect(select, hiddenNameInput, items, emptyText) {
+    const currentValue = select.value;
+
+    select.innerHTML = '';
+    select.appendChild(new Option(emptyText, ''));
+
+    items.forEach(function (item) {
+      const suffix = item.archived ? ' [архив]' : '';
+      const option = new Option(item.name + suffix, item.id);
+      option.dataset.name = item.name;
+      select.appendChild(option);
+    });
+
+    if (currentValue) {
+      select.value = currentValue;
+    }
+
+    updateSelectedName(select, hiddenNameInput);
+  }
+
+  function updateSelectedName(select, hiddenNameInput) {
+    const option = select.options[select.selectedIndex];
+    hiddenNameInput.value = option && option.value ? (option.dataset.name || option.text) : '';
+  }
+
+
+  async function startTask(url, button) {
+    setLoading(button, true);
+
+    try {
+      const json = await post(url);
+      handleTaskResponse(json);
+
+      if (!json.error) {
+        runTaskLoop();
+      }
+    } catch (error) {
+      showAlert('danger', error.message);
+    } finally {
+      setLoading(button, false);
+    }
+  }
+
+  async function runTaskLoop() {
+    if (taskLoopRunning) {
+      return;
+    }
+
+    taskLoopRunning = true;
+
+    try {
+      while (true) {
+        const json = await post(ajaxUrl('run_task_step'));
+        handleTaskResponse(json);
+
+        if (json.error || !json.task || !json.task.is_active) {
+          break;
+        }
+
+        // Небольшая пауза разгружает слабый сервер: браузер не шлет десятки
+        // AJAX-запросов подряд без передышки, а PHP успевает освободить ресурсы.
+        await new Promise(function (resolve) { setTimeout(resolve, 350); });
+      }
+    } catch (error) {
+      showAlert('danger', error.message);
+    } finally {
+      taskLoopRunning = false;
+    }
+  }
+
+  async function refreshStatus() {
+    setLoading(refreshStatusButton, true);
+
+    try {
+      const json = await post(ajaxUrl('get_task_status'));
+      handleTaskResponse(json);
+    } catch (error) {
+      showAlert('danger', error.message);
+    } finally {
+      setLoading(refreshStatusButton, false);
+    }
+  }
+
+  async function stopTask() {
+    setLoading(stopTaskButton, true);
+
+    try {
+      const json = await post(ajaxUrl('stop_task'));
+      handleTaskResponse(json);
+    } catch (error) {
+      showAlert('danger', error.message);
+    } finally {
+      setLoading(stopTaskButton, false);
+    }
+  }
+
+  function handleTaskResponse(json) {
+    if (json.error) {
+      showAlert('danger', json.error);
+    } else if (json.success) {
+      showAlert('success', json.success);
+    }
+
+    if (json.task) {
+      renderTask(json.task);
+    }
+
+    if (json.logs) {
+      renderLogs(json.logs);
+    }
+  }
+
+  function renderTask(task) {
+    if (!task || !task.task_id) {
+      taskPanel.innerHTML = '<div class="alert alert-secondary mb-0">{{ text_task_panel_empty|e('js') }}</div>';
+      return;
+    }
+
+    const statusClass = task.is_active ? 'primary' : (task.status === 'failed' ? 'danger' : 'success');
+
+    taskPanel.innerHTML = ''
+      + '<div class="row g-3">'
+      + '<div class="col-md-4"><strong>ID:</strong> #' + escapeHtml(task.task_id) + '</div>'
+      + '<div class="col-md-4"><strong>Тип:</strong> ' + escapeHtml(task.task_type_title) + '</div>'
+      + '<div class="col-md-4"><strong>Статус:</strong> <span class="badge text-bg-' + statusClass + '">' + escapeHtml(task.status_title) + '</span></div>'
+      + '<div class="col-md-12"><strong>Шаг:</strong> ' + escapeHtml(task.current_step_title) + '</div>'
+      + '</div>'
+      + '<hr/>'
+      + '<div class="row g-2 text-center">'
+      + counterHtml('{{ text_counter_processed|e('js') }}', task.processed_items)
+      + counterHtml('{{ text_counter_created|e('js') }}', task.created_items)
+      + counterHtml('{{ text_counter_updated|e('js') }}', task.updated_items)
+      + counterHtml('{{ text_counter_skipped|e('js') }}', task.skipped_items)
+      + counterHtml('{{ text_counter_disabled|e('js') }}', task.disabled_items)
+      + counterHtml('{{ text_counter_deleted|e('js') }}', task.deleted_items)
+      + counterHtml('{{ text_counter_errors|e('js') }}', task.error_items)
+      + '</div>'
+      + (task.last_error ? '<div class="alert alert-danger mt-3 mb-0">' + escapeHtml(task.last_error) + '</div>' : '');
+  }
+
+  function counterHtml(title, value) {
+    return '<div class="col-6 col-md"><div class="border rounded p-2"><div class="small text-muted">' + escapeHtml(title) + '</div><div class="fs-5">' + escapeHtml(value || 0) + '</div></div></div>';
+  }
+
+  function renderLogs(logs) {
+    if (!logs || !logs.length) {
+      logsPanel.innerHTML = '<div class="alert alert-secondary">{{ text_no_logs|e('js') }}</div>';
+      return;
+    }
+
+    let html = '<table class="table table-sm table-striped align-middle"><thead><tr><th>Дата</th><th>Уровень</th><th>Объект</th><th>Сообщение</th></tr></thead><tbody>';
+
+    logs.forEach(function (log) {
+      html += '<tr>'
+        + '<td>' + escapeHtml(log.created_at) + '</td>'
+        + '<td><span class="badge text-bg-secondary">' + escapeHtml(log.level) + '</span></td>'
+        + '<td>' + escapeHtml(log.entity_type || '') + '</td>'
+        + '<td>' + escapeHtml(log.message) + '</td>'
+        + '</tr>';
+    });
+
+    html += '</tbody></table>';
+    logsPanel.innerHTML = html;
+  }
+
+  warehouseSelect.addEventListener('change', function () {
+    updateSelectedName(warehouseSelect, warehouseName);
+  });
+
+  priceTypeSelect.addEventListener('change', function () {
+    updateSelectedName(priceTypeSelect, priceTypeName);
+  });
+
+  testButtons.forEach(function (button) {
+    button.addEventListener('click', function () {
+      testConnection(button);
+    });
+  });
+
+  loadButton.addEventListener('click', loadDictionaries);
+
+  startImportButton.addEventListener('click', function () { startTask(ajaxUrl('start_import'), startImportButton); });
+  startStockButton.addEventListener('click', function () { startTask(ajaxUrl('start_stock_update'), startStockButton); });
+  startImagesButton.addEventListener('click', function () { startTask(ajaxUrl('start_image_sync'), startImagesButton); });
+  stopTaskButton.addEventListener('click', stopTask);
+  refreshStatusButton.addEventListener('click', refreshStatus);
+
+  refreshStatus();
+})();
+</script>
+{{ footer }}
