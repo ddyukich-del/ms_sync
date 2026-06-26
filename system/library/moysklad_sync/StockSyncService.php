@@ -20,6 +20,34 @@ class StockSyncService {
         $this->taskModel = $taskModel;
     }
 
+    private function normalizeWarehouseIds(array $settings): array {
+        $ids = [];
+        $raw = $settings['module_moysklad_sync_warehouse_ids'] ?? [];
+
+        if (is_string($raw)) {
+            $decoded = json_decode($raw, true);
+            $raw = is_array($decoded) ? $decoded : [$raw];
+        }
+
+        if (is_array($raw)) {
+            foreach ($raw as $id) {
+                $id = trim((string)$id);
+                if ($id !== '') {
+                    $ids[$id] = $id;
+                }
+            }
+        }
+
+        if (!$ids && !empty($settings['module_moysklad_sync_warehouse_id'])) {
+            $id = trim((string)$settings['module_moysklad_sync_warehouse_id']);
+            if ($id !== '') {
+                $ids[$id] = $id;
+            }
+        }
+
+        return array_values($ids);
+    }
+
     /**
      * Обрабатывает одну страницу отчета остатков.
      *
@@ -31,13 +59,13 @@ class StockSyncService {
         $taskId = (int)$task['task_id'];
         $limit = max(1, (int)$task['limit_value']);
         $offset = max(0, (int)$task['offset_value']);
-        $warehouseId = trim((string)($settings['module_moysklad_sync_warehouse_id'] ?? ''));
+        $warehouseIds = $this->normalizeWarehouseIds($settings);
 
-        if ($warehouseId === '') {
-            throw new \RuntimeException('Не выбран склад МойСклад для обновления остатков.');
+        if (!$warehouseIds) {
+            throw new \RuntimeException('Не выбраны склады МойСклад для обновления остатков.');
         }
 
-        $page = $this->client->getStockPage($warehouseId, $limit, $offset, 'all');
+        $page = $this->client->getStockPageForWarehouses($warehouseIds, $limit, $offset, 'all');
         $rows = $page['rows'];
         $total = (int)$page['total'];
 
@@ -53,9 +81,17 @@ class StockSyncService {
 
         foreach ($rows as $stockRow) {
             try {
-                // Обновляем только связанные товары. Неизвестные товары пропускаем:
-                // их должен создать полный импорт, иначе получим неполные карточки.
-                $result = $this->productModel->updateStockFromMoysklad($stockRow, $taskId, $settings);
+                // Если товар уже был обновлен в этой задаче по другому складу,
+                // прибавляем остаток текущего склада, а не перезаписываем quantity.
+                if (method_exists($this->productModel, 'wasSeenInTask') && $this->productModel->wasSeenInTask((string)($stockRow['id'] ?? ''), $taskId)) {
+                    $result = method_exists($this->productModel, 'addStockQuantityFromMoysklad')
+                        ? $this->productModel->addStockQuantityFromMoysklad($stockRow, $taskId, $settings)
+                        : 'skipped';
+                } else {
+                    // Обновляем только связанные товары. Неизвестные товары пропускаем:
+                    // их должен создать полный импорт, иначе получим неполные карточки.
+                    $result = $this->productModel->updateStockFromMoysklad($stockRow, $taskId, $settings);
+                }
                 $stats['processed_items']++;
 
                 if ($result === 'updated') {

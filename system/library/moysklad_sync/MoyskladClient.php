@@ -213,7 +213,7 @@ class MoyskladClient {
             'filter' => 'store=' . $storeHref . ';stockMode=' . $stockMode
         ]);
 
-        $rows = $this->normalizeRows($result, function (array $row): array {
+        $rows = $this->normalizeRows($result, function (array $row) use ($warehouseId): array {
             // В stock/bystore сама строка отчета описывает товар/услугу через meta.
             // В некоторых форматах может быть assortment.meta — поддерживаем оба,
             // но сначала берем meta строки, как в официальных примерах отчета.
@@ -236,6 +236,7 @@ class MoyskladClient {
                 'name' => (string)($row['name'] ?? ''),
                 'article' => (string)($row['article'] ?? ''),
                 'code' => (string)($row['code'] ?? ''),
+                'warehouse_id' => $warehouseId,
                 'category_id' => $this->extractIdFromMeta($row['productFolder']['meta'] ?? $row['assortment']['productFolder']['meta'] ?? []),
                 'path_name' => (string)($row['pathName'] ?? $row['assortment']['pathName'] ?? ''),
                 // quantity сайта равняем физическому остатку выбранного склада.
@@ -251,6 +252,175 @@ class MoyskladClient {
             'limit' => $limit,
             'offset' => $offset,
         ];
+    }
+
+    /**
+     * Возвращает одну страницу остатков по нескольким выбранным складам.
+     *
+     * МойСклад отдает отчет по конкретному складу, поэтому для нескольких складов
+     * идем последовательно по каждому складу и используем общий offset задачи.
+     * Это проще и безопаснее для слабого сервера, чем тащить все остатки в память.
+     */
+    public function getStockPageForWarehouses(array $warehouseIds, int $limit, int $offset, string $stockMode = 'nonEmpty'): array {
+        $ids = [];
+        foreach ($warehouseIds as $warehouseId) {
+            $warehouseId = trim((string)$warehouseId);
+            if ($warehouseId !== '') {
+                $ids[$warehouseId] = $warehouseId;
+            }
+        }
+
+        $ids = array_values($ids);
+
+        if (!$ids) {
+            throw new \InvalidArgumentException('Не выбраны склады МойСклад для обновления остатков.');
+        }
+
+        if (count($ids) === 1) {
+            return $this->getStockPage($ids[0], $limit, $offset, $stockMode);
+        }
+
+        $limit = max(1, min(100, $limit));
+        $offset = max(0, $offset);
+        $remainingOffset = $offset;
+        $rows = [];
+        $total = 0;
+
+        foreach ($ids as $warehouseId) {
+            // Небольшой запрос с limit=1 нужен только для meta.size текущего склада.
+            $metaPage = $this->getStockPage($warehouseId, 1, 0, $stockMode);
+            $warehouseTotal = (int)$metaPage['total'];
+            $total += $warehouseTotal;
+
+            if ($remainingOffset >= $warehouseTotal) {
+                $remainingOffset -= $warehouseTotal;
+                continue;
+            }
+
+            $need = $limit - count($rows);
+            if ($need <= 0) {
+                continue;
+            }
+
+            $page = $this->getStockPage($warehouseId, $need, $remainingOffset, $stockMode);
+            foreach ($page['rows'] as $row) {
+                $row['warehouse_id'] = $warehouseId;
+                $rows[] = $row;
+            }
+
+            $remainingOffset = 0;
+
+            if (count($rows) >= $limit) {
+                break;
+            }
+        }
+
+        return [
+            'rows' => $rows,
+            'total' => $total,
+            'limit' => $limit,
+            'offset' => $offset,
+        ];
+    }
+
+
+    /**
+     * Возвращает статусы заказов поставщикам.
+     *
+     * Эти статусы нужны в настройках модуля как множественный выбор: пользователь
+     * сам решает, какие документы считать ожидаемым поступлением, например
+     * «ПРЕДЗАКАЗ» и «ПОПОЛНЕНИЕ СКЛАДА» одновременно.
+     */
+    public function getPurchaseOrderStates(): array {
+        $result = $this->http->request('GET', '/entity/purchaseorder/metadata');
+        $states = $result['states'] ?? [];
+
+        if (!is_array($states)) {
+            return [];
+        }
+
+        $rows = [];
+
+        foreach ($states as $state) {
+            if (!is_array($state)) {
+                continue;
+            }
+
+            $row = $this->normalizePurchaseOrderStateRow($state);
+
+            if (($row['id'] ?? '') !== '') {
+                $rows[] = $row;
+            }
+        }
+
+        return $rows;
+    }
+
+    /** Возвращает одну страницу заказов поставщикам. */
+    public function getPurchaseOrdersPage(int $limit, int $offset): array {
+        $limit = max(1, min(100, $limit));
+        $offset = max(0, $offset);
+
+        $result = $this->http->request('GET', '/entity/purchaseorder', [
+            'limit' => $limit,
+            'offset' => $offset,
+            // Разворачиваем статус, чтобы фильтровать документы по ID статуса,
+            // выбранному в настройках. Если конкретный аккаунт вернет только meta,
+            // normalizePurchaseOrderRow все равно достанет ID из href.
+            'expand' => 'state'
+        ]);
+
+        $rows = $this->normalizeRows($result, function (array $row): array {
+            return $this->normalizePurchaseOrderRow($row);
+        });
+
+        return [
+            'rows' => $rows,
+            'total' => (int)($result['meta']['size'] ?? 0),
+            'limit' => $limit,
+            'offset' => $offset,
+        ];
+    }
+
+    /**
+     * Возвращает позиции одного заказа поставщику.
+     *
+     * Позиции документа читаем внутри шага purchaseorder. Обычно их немного, но
+     * метод все равно поддерживает пагинацию, чтобы не терять строки в больших
+     * заказах. Ограничение 2000 позиций защищает слабый сервер от бесконечного
+     * цикла при нестандартном ответе API.
+     */
+    public function getPurchaseOrderPositions(string $purchaseOrderId, int $limit = 100): array {
+        $purchaseOrderId = trim($purchaseOrderId);
+        $limit = max(1, min(100, $limit));
+
+        if ($purchaseOrderId === '') {
+            return [];
+        }
+
+        $rows = [];
+        $offset = 0;
+        $guard = 0;
+
+        do {
+            $result = $this->http->request('GET', '/entity/purchaseorder/' . rawurlencode($purchaseOrderId) . '/positions', [
+                'limit' => $limit,
+                'offset' => $offset,
+                'expand' => 'assortment'
+            ]);
+
+            $pageRows = $this->normalizeRows($result, function (array $row): array {
+                return $this->normalizePurchaseOrderPositionRow($row);
+            });
+
+            $rows = array_merge($rows, $pageRows);
+            $count = count($result['rows'] ?? []);
+            $total = (int)($result['meta']['size'] ?? 0);
+            $offset += $count;
+            $guard += $count;
+        } while ($count === $limit && ($total === 0 || $offset < $total) && $guard < 2000);
+
+        return $rows;
     }
 
 
@@ -433,6 +603,71 @@ class MoyskladClient {
             'stock' => is_numeric($stock) ? (float)$stock : 0.0,
             'reserve' => is_numeric($reserve) ? (float)$reserve : 0.0,
             'in_transit' => is_numeric($inTransit) ? (float)$inTransit : 0.0,
+        ];
+    }
+
+
+    /** Нормализует статус заказа поставщику. */
+    private function normalizePurchaseOrderStateRow(array $row): array {
+        $meta = is_array($row['meta'] ?? null) ? $row['meta'] : [];
+
+        return [
+            'id' => $this->extractId($row) ?: $this->extractIdFromMeta($meta),
+            'name' => (string)($row['name'] ?? ''),
+            'href' => (string)($meta['href'] ?? ''),
+            'color' => (string)($row['color'] ?? ''),
+        ];
+    }
+
+    /** Нормализует заказ поставщику. */
+    private function normalizePurchaseOrderRow(array $row): array {
+        $state = is_array($row['state'] ?? null) ? $row['state'] : [];
+        $stateMeta = is_array($state['meta'] ?? null) ? $state['meta'] : [];
+        $meta = is_array($row['meta'] ?? null) ? $row['meta'] : [];
+
+        return [
+            'id' => $this->extractId($row),
+            'href' => (string)($meta['href'] ?? ''),
+            'name' => (string)($row['name'] ?? ''),
+            'moment' => (string)($row['moment'] ?? ''),
+            'applicable' => $this->toBool($row['applicable'] ?? true),
+            'state_id' => $this->extractIdFromMeta($stateMeta) ?: $this->extractId($state),
+            'state_name' => (string)($state['name'] ?? ''),
+            'state_href' => (string)($stateMeta['href'] ?? ''),
+        ];
+    }
+
+    /** Нормализует позицию заказа поставщику. */
+    private function normalizePurchaseOrderPositionRow(array $row): array {
+        $assortment = is_array($row['assortment'] ?? null) ? $row['assortment'] : [];
+        $meta = is_array($assortment['meta'] ?? null) ? $assortment['meta'] : [];
+        $assortmentType = (string)($meta['type'] ?? '');
+        $assortmentId = $this->extractIdFromMeta($meta) ?: $this->extractId($assortment);
+
+        // В заказах поставщикам в позициях может лежать не только product, но и
+        // variant. Модификации мы пока не синхронизируем как отдельные опции, но
+        // если МойСклад отдал variant с ссылкой на родительский product, импортируем
+        // родительский товар. Иначе такие ожидаемые позиции молча пропускались.
+        $parentProduct = is_array($assortment['product'] ?? null) ? $assortment['product'] : [];
+        $parentProductMeta = is_array($parentProduct['meta'] ?? null) ? $parentProduct['meta'] : [];
+        $parentProductId = $this->extractIdFromMeta($parentProductMeta) ?: $this->extractId($parentProduct);
+
+        $productId = $assortmentType === 'variant' && $parentProductId !== '' ? $parentProductId : $assortmentId;
+        $productHref = $assortmentType === 'variant' && !empty($parentProductMeta['href']) ? (string)$parentProductMeta['href'] : (string)($meta['href'] ?? '');
+        $positionId = $this->extractId($row);
+
+        if ($positionId === '') {
+            $positionId = $productId !== '' ? $productId : hash('sha256', json_encode($row, JSON_UNESCAPED_UNICODE));
+        }
+
+        return [
+            'id' => $positionId,
+            'product_id' => $productId,
+            'product_href' => $productHref,
+            'assortment_id' => $assortmentId,
+            'type' => $assortmentType,
+            'name' => (string)($assortment['name'] ?? $row['name'] ?? ''),
+            'quantity' => isset($row['quantity']) && is_numeric($row['quantity']) ? (float)$row['quantity'] : 0.0,
         ];
     }
 

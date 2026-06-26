@@ -1,5 +1,21 @@
 {{ header }}{{ column_left }}
 <div id="content">
+  <style id="moysklad-sync-products-style">
+    .moysklad-products-toolbar { background: #f8fafc; border: 1px solid #dbe3ea; border-radius: 8px; padding: 14px; }
+    .moysklad-products-toolbar .form-label { font-size: 12px; font-weight: 600; color: #334155; margin-bottom: 4px; }
+    .moysklad-sort-presets { margin: -2px 0 14px 0; padding: 10px 12px; border: 1px solid #e5edf5; border-radius: 8px; background: #f8fafc; }
+    .moysklad-sort-presets .btn { margin: 0 6px 6px 0; }
+    .moysklad-products-summary { display: grid; grid-template-columns: repeat(4, minmax(140px, 1fr)); gap: 10px; margin-bottom: 12px; }
+    .moysklad-products-summary .summary-item { border: 1px solid #dbe3ea; border-radius: 8px; padding: 10px 12px; background: #fff; }
+    .moysklad-products-summary .summary-label { font-size: 12px; color: #64748b; }
+    .moysklad-products-summary .summary-value { font-size: 20px; font-weight: 700; color: #0f172a; }
+    .moysklad-products-table thead th { position: sticky; top: 0; z-index: 1; background: #f8fafc; vertical-align: middle; }
+    .moysklad-products-table tbody tr:hover { background: #f1f5f9; }
+    .moysklad-product-name { max-width: 420px; }
+    .moysklad-muted-small { font-size: 12px; color: #64748b; }
+    .moysklad-number { font-variant-numeric: tabular-nums; font-weight: 600; }
+    @media (max-width: 991px) { .moysklad-products-summary { grid-template-columns: repeat(2, minmax(140px, 1fr)); } }
+  </style>
   <div class="page-header">
     <div class="container-fluid">
       <div class="float-end">
@@ -24,6 +40,7 @@
         <ul class="nav nav-tabs" id="moysklad-tabs" role="tablist">
           <li class="nav-item" role="presentation"><button class="nav-link active" id="tab-settings" data-bs-toggle="tab" data-bs-target="#pane-settings" type="button" role="tab">{{ text_tab_settings }}</button></li>
           <li class="nav-item" role="presentation"><button class="nav-link" id="tab-sync" data-bs-toggle="tab" data-bs-target="#pane-sync" type="button" role="tab">{{ text_tab_sync }}</button></li>
+          <li class="nav-item" role="presentation"><button class="nav-link" id="tab-products" data-bs-toggle="tab" data-bs-target="#pane-products" type="button" role="tab">{{ text_tab_products }}</button></li>
           <li class="nav-item" role="presentation"><button class="nav-link" id="tab-logs" data-bs-toggle="tab" data-bs-target="#pane-logs" type="button" role="tab">{{ text_tab_logs }}</button></li>
         </ul>
 
@@ -59,13 +76,13 @@
                 <div class="row mb-3">
                   <label class="col-sm-3 col-form-label" for="input-warehouse-id">{{ entry_warehouse_id }}</label>
                   <div class="col-sm-9">
-                    <input type="hidden" name="module_moysklad_sync_warehouse_name" id="input-warehouse-name" value="{{ module_moysklad_sync_warehouse_name }}"/>
-                    <select name="module_moysklad_sync_warehouse_id" id="input-warehouse-id" class="form-select">
-                      <option value="">{{ text_select_warehouse }}</option>
-                      {% if module_moysklad_sync_warehouse_id %}
-                        <option value="{{ module_moysklad_sync_warehouse_id }}" selected>{{ module_moysklad_sync_warehouse_name ?: text_current_value ~ ': ' ~ module_moysklad_sync_warehouse_id }}</option>
-                      {% endif %}
+                    <select name="module_moysklad_sync_warehouse_ids[]" id="input-warehouse-id" class="form-select" multiple size="6">
+                      {% for warehouse_id in module_moysklad_sync_warehouse_ids %}
+                        {% set warehouse_name = module_moysklad_sync_warehouse_names[loop.index0] ?? '' %}
+                        <option value="{{ warehouse_id }}" selected>{{ warehouse_name ?: text_current_value ~ ': ' ~ warehouse_id }}</option>
+                      {% endfor %}
                     </select>
+                    <div id="warehouse-names-hidden"></div>
                     <div class="form-text">{{ help_warehouse_id }}</div>
                   </div>
                 </div>
@@ -81,6 +98,67 @@
                       {% endif %}
                     </select>
                     <div class="form-text">{{ help_price_type_id }}</div>
+                  </div>
+                </div>
+
+
+                <div class="row mb-3">
+                  <label class="col-sm-3 col-form-label" for="input-purchase-orders-enabled">{{ entry_purchase_orders_enabled }}</label>
+                  <div class="col-sm-9">
+                    <div class="form-check form-switch form-switch-lg">
+                      <input type="hidden" name="module_moysklad_sync_purchase_orders_enabled" value="0"/>
+                      <input type="checkbox" name="module_moysklad_sync_purchase_orders_enabled" value="1" id="input-purchase-orders-enabled" class="form-check-input"{% if module_moysklad_sync_purchase_orders_enabled %} checked{% endif %}/>
+                    </div>
+                    <div class="form-text">{{ help_purchase_orders_enabled }}</div>
+                  </div>
+                </div>
+
+                <div class="row mb-3">
+                  <label class="col-sm-3 col-form-label" for="input-purchase-order-state-ids">{{ entry_purchase_order_states }}</label>
+                  <div class="col-sm-9">
+                    <select name="module_moysklad_sync_purchase_order_state_ids[]" id="input-purchase-order-state-ids" class="form-select" multiple size="6">
+                      {% for state_id in module_moysklad_sync_purchase_order_state_ids %}
+                        <option value="{{ state_id }}" selected>{{ text_current_value }}: {{ state_id }}</option>
+                      {% endfor %}
+                    </select>
+                    <div class="form-text">{{ help_purchase_order_states }}</div>
+                  </div>
+                </div>
+
+                <div class="row mb-3">
+                  <label class="col-sm-3 col-form-label" for="input-incoming-quantity-mode">{{ entry_incoming_quantity_mode }}</label>
+                  <div class="col-sm-9">
+                    <select name="module_moysklad_sync_incoming_quantity_mode" id="input-incoming-quantity-mode" class="form-select">
+                      {% for value, title in incoming_quantity_mode_options %}
+                        <option value="{{ value }}"{% if value == module_moysklad_sync_incoming_quantity_mode %} selected{% endif %}>{{ title }}</option>
+                      {% endfor %}
+                    </select>
+                    <div class="form-text">{{ help_incoming_quantity_mode }}</div>
+                  </div>
+                </div>
+
+                <div class="row mb-3">
+                  <label class="col-sm-3 col-form-label" for="input-incoming-product-match-mode">{{ entry_incoming_product_match_mode }}</label>
+                  <div class="col-sm-9">
+                    <select name="module_moysklad_sync_incoming_product_match_mode" id="input-incoming-product-match-mode" class="form-select">
+                      {% for value, title in incoming_product_match_mode_options %}
+                        <option value="{{ value }}"{% if value == module_moysklad_sync_incoming_product_match_mode %} selected{% endif %}>{{ title }}</option>
+                      {% endfor %}
+                    </select>
+                    <div class="form-text">{{ help_incoming_product_match_mode }}</div>
+                  </div>
+                </div>
+
+                <div class="row mb-3">
+                  <label class="col-sm-3 col-form-label" for="input-incoming-stock-status-id">{{ entry_incoming_stock_status_id }}</label>
+                  <div class="col-sm-9">
+                    <select name="module_moysklad_sync_incoming_stock_status_id" id="input-incoming-stock-status-id" class="form-select">
+                      <option value="0">{{ text_current_value }}: {{ module_moysklad_sync_incoming_stock_status_id }}</option>
+                      {% for stock_status_id, stock_status_name in stock_status_options %}
+                        <option value="{{ stock_status_id }}"{% if stock_status_id == module_moysklad_sync_incoming_stock_status_id %} selected{% endif %}>{{ stock_status_name }}</option>
+                      {% endfor %}
+                    </select>
+                    <div class="form-text">{{ help_incoming_stock_status_id }}</div>
                   </div>
                 </div>
 
@@ -218,6 +296,108 @@
             </div>
           </div>
 
+          <div class="tab-pane fade" id="pane-products" role="tabpanel">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+              <h3 class="mb-0">{{ text_products_status_title }}</h3>
+              <div class="d-flex gap-2">
+                <button type="button" class="btn btn-success btn-sm" id="button-export-products"><i class="fa-solid fa-file-csv"></i> {{ button_export_products }}</button>
+                <button type="button" class="btn btn-light btn-sm" id="button-refresh-products"><i class="fa-solid fa-rotate"></i> {{ button_refresh_status }}</button>
+              </div>
+            </div>
+            <div class="alert alert-info"><i class="fa-solid fa-circle-info"></i> {{ text_products_status_help }}</div>
+
+            <div class="card mb-3 border-0 shadow-sm">
+              <div class="card-header bg-light d-flex justify-content-between align-items-center">
+                <strong><i class="fa-solid fa-sliders"></i> {{ text_products_filters_title }}</strong>
+                <span class="small text-muted">{{ text_products_filters_help }}</span>
+              </div>
+              <div class="card-body moysklad-products-toolbar">
+                <div class="row g-3 align-items-end">
+                  <div class="col-lg-3 col-md-6">
+                    <label class="form-label" for="product-filter-search">{{ entry_product_filter_search }}</label>
+                    <input type="text" id="product-filter-search" class="form-control" placeholder="Название, артикул, заказ"/>
+                  </div>
+                  <div class="col-lg-2 col-md-6">
+                    <label class="form-label" for="product-filter-source">{{ entry_product_filter_source }}</label>
+                    <select id="product-filter-source" class="form-select">
+                      <option value="">{{ text_all }}</option>
+                      <option value="stock">{{ text_product_source_stock }}</option>
+                      <option value="incoming">{{ text_product_source_incoming }}</option>
+                      <option value="stock_incoming">{{ text_product_source_stock_incoming }}</option>
+                      <option value="missing">{{ text_product_source_missing }}</option>
+                    </select>
+                  </div>
+                  <div class="col-lg-2 col-md-6">
+                    <label class="form-label" for="product-filter-status">{{ entry_product_filter_status }}</label>
+                    <select id="product-filter-status" class="form-select">
+                      <option value="">{{ text_all }}</option>
+                      <option value="enabled">{{ text_status_enabled }}</option>
+                      <option value="disabled">{{ text_status_disabled }}</option>
+                    </select>
+                  </div>
+                  <div class="col-lg-2 col-md-6">
+                    <label class="form-label" for="product-filter-quantity">{{ entry_product_filter_quantity }}</label>
+                    <select id="product-filter-quantity" class="form-select">
+                      <option value="">{{ text_all }}</option>
+                      <option value="positive">{{ text_quantity_positive }}</option>
+                      <option value="zero">{{ text_quantity_zero }}</option>
+                    </select>
+                  </div>
+                  <div class="col-lg-2 col-md-6">
+                    <label class="form-label" for="product-filter-expected">{{ entry_product_filter_expected }}</label>
+                    <select id="product-filter-expected" class="form-select">
+                      <option value="">{{ text_all }}</option>
+                      <option value="positive">{{ text_expected_positive }}</option>
+                      <option value="zero">{{ text_expected_zero }}</option>
+                    </select>
+                  </div>
+                  <div class="col-lg-1 col-md-6">
+                    <label class="form-label" for="product-filter-limit">{{ entry_product_limit }}</label>
+                    <select id="product-filter-limit" class="form-select">
+                      <option value="50">50</option>
+                      <option value="150" selected>150</option>
+                      <option value="300">300</option>
+                      <option value="500">500</option>
+                    </select>
+                  </div>
+                  <div class="col-lg-3 col-md-6">
+                    <label class="form-label" for="product-filter-order-state">{{ entry_product_filter_order_state }}</label>
+                    <input type="text" id="product-filter-order-state" class="form-control" placeholder="ПРЕДЗАКАЗ"/>
+                  </div>
+                  <div class="col-lg-3 col-md-6">
+                    <label class="form-label" for="product-sort">{{ entry_product_sort }}</label>
+                    <select id="product-sort" class="form-select">
+                      <option value="product" selected>{{ text_sort_by_product }}</option>
+                      <option value="article">{{ text_sort_by_article }}</option>
+                      <option value="source">{{ text_sort_by_source }}</option>
+                      <option value="quantity">{{ text_sort_by_quantity }}</option>
+                      <option value="expected">{{ text_sort_by_expected }}</option>
+                      <option value="stock_status">{{ text_sort_by_stock_status }}</option>
+                      <option value="purchase_order">{{ text_sort_by_purchase_order }}</option>
+                      <option value="updated">{{ text_sort_by_updated }}</option>
+                    </select>
+                  </div>
+                  <div class="col-lg-3 col-md-6">
+                    <label class="form-label" for="product-order">{{ entry_product_order }}</label>
+                    <select id="product-order" class="form-select">
+                      <option value="ASC">{{ text_order_asc }}</option>
+                      <option value="DESC">{{ text_order_desc }}</option>
+                    </select>
+                  </div>
+                  <div class="col-lg-3 col-md-6 d-flex gap-2">
+                    <button type="button" class="btn btn-primary flex-fill" id="button-apply-product-filter"><i class="fa-solid fa-filter"></i> {{ button_apply_filter }}</button>
+                    <button type="button" class="btn btn-light" id="button-reset-product-filter"><i class="fa-solid fa-xmark"></i> {{ button_reset_filter }}</button>
+                  </div>
+                </div>
+
+              </div>
+            </div>
+
+            <div id="products-status-panel" class="table-responsive">
+              <div class="alert alert-secondary">{{ text_no_products_status }}</div>
+            </div>
+          </div>
+
           <div class="tab-pane fade" id="pane-logs" role="tabpanel">
             <h3>{{ text_logs_latest }}</h3>
             <div id="logs-panel" class="table-responsive">
@@ -239,9 +419,10 @@
   const testButtons = [document.getElementById('button-test-connection'), document.getElementById('button-test-connection-sync')].filter(Boolean);
   const loadButton = document.getElementById('button-load-dictionaries');
   const warehouseSelect = document.getElementById('input-warehouse-id');
-  const warehouseName = document.getElementById('input-warehouse-name');
+  const warehouseNamesHidden = document.getElementById('warehouse-names-hidden');
   const priceTypeSelect = document.getElementById('input-price-type-id');
   const priceTypeName = document.getElementById('input-price-type-name');
+  const purchaseOrderStatesSelect = document.getElementById('input-purchase-order-state-ids');
   const startImportButton = document.getElementById('button-start-import');
   const startStockButton = document.getElementById('button-start-stock');
   const startImagesButton = document.getElementById('button-start-images');
@@ -249,6 +430,20 @@
   const refreshStatusButton = document.getElementById('button-refresh-status');
   const taskPanel = document.getElementById('task-panel');
   const logsPanel = document.getElementById('logs-panel');
+  const productsStatusPanel = document.getElementById('products-status-panel');
+  const refreshProductsButton = document.getElementById('button-refresh-products');
+  const exportProductsButton = document.getElementById('button-export-products');
+  const productFilterSearch = document.getElementById('product-filter-search');
+  const productFilterSource = document.getElementById('product-filter-source');
+  const productFilterStatus = document.getElementById('product-filter-status');
+  const productFilterQuantity = document.getElementById('product-filter-quantity');
+  const productFilterExpected = document.getElementById('product-filter-expected');
+  const productFilterOrderState = document.getElementById('product-filter-order-state');
+  const productFilterLimit = document.getElementById('product-filter-limit');
+  const productSort = document.getElementById('product-sort');
+  const productOrder = document.getElementById('product-order');
+  const applyProductFilterButton = document.getElementById('button-apply-product-filter');
+  const resetProductFilterButton = document.getElementById('button-reset-product-filter');
   let taskLoopRunning = false;
 
   // Важно: AJAX-URL собираем на стороне браузера из текущего URL страницы.
@@ -260,6 +455,41 @@
   function ajaxUrl(action) {
     const url = new URL(window.location.href);
     url.searchParams.set('ajax_action', action);
+    return url.toString();
+  }
+
+  function productStatusesUrl() {
+    const url = new URL(ajaxUrl('get_product_statuses'));
+
+    const setParam = function (name, element) {
+      if (!element) {
+        return;
+      }
+
+      const value = (element.value || '').trim();
+
+      if (value !== '') {
+        url.searchParams.set(name, value);
+      }
+    };
+
+    setParam('filter_search', productFilterSearch);
+    setParam('filter_source', productFilterSource);
+    setParam('filter_status', productFilterStatus);
+    setParam('filter_quantity', productFilterQuantity);
+    setParam('filter_expected', productFilterExpected);
+    setParam('filter_order_state', productFilterOrderState);
+    setParam('limit', productFilterLimit);
+    setParam('sort', productSort);
+    setParam('order', productOrder);
+
+    return url.toString();
+  }
+
+  function productExportUrl() {
+    const url = new URL(productStatusesUrl());
+    url.searchParams.set('ajax_action', 'export_product_statuses');
+    url.searchParams.set('export_limit', '10000');
     return url.toString();
   }
 
@@ -343,8 +573,10 @@
         return;
       }
 
-      fillSelect(warehouseSelect, warehouseName, json.warehouses || [], '{{ text_select_warehouse|e('js') }}');
+      fillMultiSelect(warehouseSelect, json.warehouses || []);
+      updateWarehouseNamesHidden();
       fillSelect(priceTypeSelect, priceTypeName, json.price_types || [], '{{ text_select_price_type|e('js') }}');
+      fillMultiSelect(purchaseOrderStatesSelect, json.purchase_order_states || []);
       showAlert('success', json.success);
     } catch (error) {
       showAlert('danger', error.message);
@@ -373,9 +605,52 @@
     updateSelectedName(select, hiddenNameInput);
   }
 
+
+  function fillMultiSelect(select, items) {
+    if (!select) {
+      return;
+    }
+
+    const selectedValues = Array.from(select.selectedOptions).map(function (option) { return option.value; });
+    const seen = {};
+    select.innerHTML = '';
+
+    items.forEach(function (item) {
+      const suffix = item.archived ? ' [архив]' : '';
+      const option = new Option((item.name || item.id) + suffix, item.id);
+      option.dataset.name = item.name || item.id;
+      option.selected = selectedValues.indexOf(item.id) !== -1;
+      seen[item.id] = true;
+      select.appendChild(option);
+    });
+
+    selectedValues.forEach(function (value) {
+      if (!seen[value]) {
+        const option = new Option('{{ text_current_value|e('js') }}: ' + value, value);
+        option.selected = true;
+        select.appendChild(option);
+      }
+    });
+  }
+
   function updateSelectedName(select, hiddenNameInput) {
     const option = select.options[select.selectedIndex];
     hiddenNameInput.value = option && option.value ? (option.dataset.name || option.text) : '';
+  }
+
+  function updateWarehouseNamesHidden() {
+    if (!warehouseSelect || !warehouseNamesHidden) {
+      return;
+    }
+
+    warehouseNamesHidden.innerHTML = '';
+    Array.from(warehouseSelect.selectedOptions).forEach(function (option) {
+      const input = document.createElement('input');
+      input.type = 'hidden';
+      input.name = 'module_moysklad_sync_warehouse_names[]';
+      input.value = option.dataset.name || option.text || '';
+      warehouseNamesHidden.appendChild(input);
+    });
   }
 
 
@@ -463,6 +738,10 @@
     if (json.logs) {
       renderLogs(json.logs);
     }
+
+    if (json.product_statuses) {
+      renderProductStatuses(json.product_statuses);
+    }
   }
 
   function renderTask(task) {
@@ -497,6 +776,144 @@
     return '<div class="col-6 col-md"><div class="border rounded p-2"><div class="small text-muted">' + escapeHtml(title) + '</div><div class="fs-5">' + escapeHtml(value || 0) + '</div></div></div>';
   }
 
+  async function refreshProductStatuses() {
+    setLoading(refreshProductsButton, true);
+
+    try {
+      const json = await post(productStatusesUrl());
+
+      if (json.error) {
+        showAlert('danger', json.error);
+        return;
+      }
+
+      renderProductStatuses(json.product_statuses || []);
+    } catch (error) {
+      showAlert('danger', error.message);
+    } finally {
+      setLoading(refreshProductsButton, false);
+    }
+  }
+
+  function renderProductStatuses(rows) {
+    if (!productsStatusPanel) {
+      return;
+    }
+
+    if (!rows || !rows.length) {
+      productsStatusPanel.innerHTML = '<div class="alert alert-secondary">{{ text_no_products_status|e('js') }}</div>';
+      return;
+    }
+
+    const sortButton = function (key, title) {
+      const active = productSort && productSort.value === key;
+      const icon = active ? (productOrder && productOrder.value === 'DESC' ? ' ↓' : ' ↑') : '';
+      return '<button type="button" class="btn btn-link p-0 product-sort-link" data-sort="' + escapeHtml(key) + '">' + escapeHtml(title) + icon + '</button>';
+    };
+
+    let totalQuantity = 0;
+    let totalExpected = 0;
+    let incomingCount = 0;
+    let stockCount = 0;
+
+    rows.forEach(function (row) {
+      totalQuantity += Number(row.quantity || 0);
+      totalExpected += Number(row.expected_quantity || row.incoming_quantity || 0);
+
+      if (row.sync_source === 'incoming' || row.sync_source === 'stock_incoming') {
+        incomingCount++;
+      }
+
+      if (row.sync_source === 'stock' || row.sync_source === 'stock_incoming') {
+        stockCount++;
+      }
+    });
+
+    let html = '<div class="moysklad-products-summary">'
+      + '<div class="summary-item"><div class="summary-label">{{ text_summary_shown|e('js') }}</div><div class="summary-value">' + escapeHtml(rows.length) + '</div></div>'
+      + '<div class="summary-item"><div class="summary-label">{{ text_summary_stock|e('js') }}</div><div class="summary-value">' + escapeHtml(stockCount) + '</div></div>'
+      + '<div class="summary-item"><div class="summary-label">{{ text_summary_incoming|e('js') }}</div><div class="summary-value">' + escapeHtml(incomingCount) + '</div></div>'
+      + '<div class="summary-item"><div class="summary-label">{{ text_summary_expected|e('js') }}</div><div class="summary-value">' + escapeHtml(totalExpected) + '</div></div>'
+      + '</div>';
+
+    html += '<div class="moysklad-sort-presets">'
+      + '<div class="small fw-bold text-muted mb-2">{{ text_sort_presets|e('js') }}</div>'
+      + '<button type="button" class="btn btn-outline-secondary btn-sm product-sort-preset" data-sort="product" data-order="ASC"><i class="fa-solid fa-arrow-down-a-z"></i> {{ text_sort_name_asc|e('js') }}</button>'
+      + '<button type="button" class="btn btn-outline-secondary btn-sm product-sort-preset" data-sort="product" data-order="DESC"><i class="fa-solid fa-arrow-up-z-a"></i> {{ text_sort_name_desc|e('js') }}</button>'
+      + '<button type="button" class="btn btn-outline-secondary btn-sm product-sort-preset" data-sort="quantity" data-order="DESC"><i class="fa-solid fa-arrow-down-wide-short"></i> {{ text_sort_quantity_desc|e('js') }}</button>'
+      + '<button type="button" class="btn btn-outline-secondary btn-sm product-sort-preset" data-sort="quantity" data-order="ASC"><i class="fa-solid fa-arrow-up-wide-short"></i> {{ text_sort_quantity_asc|e('js') }}</button>'
+      + '<button type="button" class="btn btn-outline-secondary btn-sm product-sort-preset" data-sort="expected" data-order="DESC"><i class="fa-solid fa-truck-fast"></i> {{ text_sort_expected_desc|e('js') }}</button>'
+      + '<button type="button" class="btn btn-outline-secondary btn-sm product-sort-preset" data-sort="expected" data-order="ASC"><i class="fa-solid fa-truck"></i> {{ text_sort_expected_asc|e('js') }}</button>'
+      + '<button type="button" class="btn btn-outline-secondary btn-sm product-sort-preset" data-sort="updated" data-order="DESC"><i class="fa-solid fa-clock-rotate-left"></i> {{ text_sort_updated_desc|e('js') }}</button>'
+      + '<button type="button" class="btn btn-outline-secondary btn-sm product-sort-preset" data-sort="updated" data-order="ASC"><i class="fa-regular fa-clock"></i> {{ text_sort_updated_asc|e('js') }}</button>'
+      + '</div>';
+
+    html += '<table class="table table-sm table-striped table-hover align-middle moysklad-products-table">'
+      + '<thead><tr>'
+      + '<th>' + sortButton('product', '{{ column_product|e('js') }}') + '</th>'
+      + '<th>' + sortButton('article', '{{ column_article|e('js') }}') + '</th>'
+      + '<th>' + sortButton('source', '{{ column_sync_source|e('js') }}') + '</th>'
+      + '<th>' + sortButton('quantity', '{{ column_quantity|e('js') }}') + '</th>'
+      + '<th>' + sortButton('expected', '{{ column_expected_quantity|e('js') }}') + '</th>'
+      + '<th>' + sortButton('stock_status', '{{ column_stock_status|e('js') }}') + '</th>'
+      + '<th>' + sortButton('purchase_order', '{{ column_purchase_order|e('js') }}') + '</th>'
+      + '<th>' + sortButton('updated', '{{ column_updated|e('js') }}') + '</th>'
+      + '</tr></thead><tbody>';
+
+    rows.forEach(function (row) {
+      const productState = Number(row.status || 0) === 1 ? '' : '<div class="small text-danger">{{ text_product_disabled|e('js') }}</div>';
+      const expectedQuantity = (row.sync_source === 'incoming' || row.sync_source === 'stock_incoming') ? (row.expected_quantity || row.incoming_quantity || '0') : '—';
+      const orderInfo = row.purchase_order_name
+        ? escapeHtml(row.purchase_order_name) + (row.purchase_order_state_name ? '<div class="small text-muted">' + escapeHtml(row.purchase_order_state_name) + '</div>' : '')
+        : '—';
+
+      html += '<tr>'
+        + '<td class="moysklad-product-name"><strong>' + escapeHtml(row.name || '') + '</strong><div class="moysklad-muted-small">ID: ' + escapeHtml(row.product_id || '') + '</div>' + productState + '</td>'
+        + '<td>' + escapeHtml(row.article || '') + '</td>'
+        + '<td><span class="badge text-bg-' + escapeHtml(row.sync_source_badge || 'secondary') + '">' + escapeHtml(row.sync_source_title || '') + '</span></td>'
+        + '<td class="moysklad-number">' + escapeHtml(row.quantity || '0') + '</td>'
+        + '<td class="moysklad-number">' + escapeHtml(expectedQuantity) + '</td>'
+        + '<td>' + escapeHtml(row.stock_status_name || '') + '</td>'
+        + '<td>' + orderInfo + '</td>'
+        + '<td>' + escapeHtml(row.last_synced_at || '') + '</td>'
+        + '</tr>';
+    });
+
+    html += '</tbody></table>';
+    productsStatusPanel.innerHTML = html;
+
+    productsStatusPanel.querySelectorAll('.product-sort-link').forEach(function (button) {
+      button.addEventListener('click', function () {
+        const nextSort = button.getAttribute('data-sort') || 'source';
+
+        if (productSort && productOrder) {
+          if (productSort.value === nextSort) {
+            productOrder.value = productOrder.value === 'DESC' ? 'ASC' : 'DESC';
+          } else {
+            productSort.value = nextSort;
+            productOrder.value = 'ASC';
+          }
+        }
+
+        refreshProductStatuses();
+      });
+    });
+
+    productsStatusPanel.querySelectorAll('.product-sort-preset').forEach(function (button) {
+      button.addEventListener('click', function () {
+        if (productSort) {
+          productSort.value = button.getAttribute('data-sort') || 'product';
+        }
+
+        if (productOrder) {
+          productOrder.value = button.getAttribute('data-order') || 'ASC';
+        }
+
+        refreshProductStatuses();
+      });
+    });
+  }
+
   function renderLogs(logs) {
     if (!logs || !logs.length) {
       logsPanel.innerHTML = '<div class="alert alert-secondary">{{ text_no_logs|e('js') }}</div>';
@@ -518,9 +935,7 @@
     logsPanel.innerHTML = html;
   }
 
-  warehouseSelect.addEventListener('change', function () {
-    updateSelectedName(warehouseSelect, warehouseName);
-  });
+  warehouseSelect.addEventListener('change', updateWarehouseNamesHidden);
 
   priceTypeSelect.addEventListener('change', function () {
     updateSelectedName(priceTypeSelect, priceTypeName);
@@ -539,7 +954,66 @@
   startImagesButton.addEventListener('click', function () { startTask(ajaxUrl('start_image_sync'), startImagesButton); });
   stopTaskButton.addEventListener('click', stopTask);
   refreshStatusButton.addEventListener('click', refreshStatus);
+  if (refreshProductsButton) {
+    refreshProductsButton.addEventListener('click', refreshProductStatuses);
+  }
 
+  if (exportProductsButton) {
+    exportProductsButton.addEventListener('click', function () {
+      window.location.href = productExportUrl();
+    });
+  }
+
+  if (applyProductFilterButton) {
+    applyProductFilterButton.addEventListener('click', refreshProductStatuses);
+  }
+
+  if (resetProductFilterButton) {
+    resetProductFilterButton.addEventListener('click', function () {
+      [productFilterSearch, productFilterSource, productFilterStatus, productFilterQuantity, productFilterExpected, productFilterOrderState].forEach(function (element) {
+        if (element) {
+          element.value = '';
+        }
+      });
+
+      if (productFilterLimit) {
+        productFilterLimit.value = '150';
+      }
+
+      if (productSort) {
+        productSort.value = 'product';
+      }
+
+      if (productOrder) {
+        productOrder.value = 'ASC';
+      }
+
+      refreshProductStatuses();
+    });
+  }
+
+  [productFilterSource, productFilterStatus, productFilterQuantity, productFilterExpected, productFilterLimit, productSort, productOrder].forEach(function (element) {
+    if (!element) {
+      return;
+    }
+
+    element.addEventListener('change', refreshProductStatuses);
+  });
+
+  [productFilterSearch, productFilterOrderState].forEach(function (element) {
+    if (!element) {
+      return;
+    }
+
+    element.addEventListener('keydown', function (event) {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        refreshProductStatuses();
+      }
+    });
+  });
+
+  updateWarehouseNamesHidden();
   refreshStatus();
 })();
 </script>

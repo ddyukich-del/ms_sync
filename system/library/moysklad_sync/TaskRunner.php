@@ -71,6 +71,10 @@ class TaskRunner {
                 $productService = $this->requireDependency($dependencies, 'product_service');
                 return $productService->syncPage($task, $settings);
 
+            case 'sync_incoming_products':
+                $purchaseOrderService = $this->requireDependency($dependencies, 'purchase_order_service');
+                return $purchaseOrderService->syncPage($task, $settings);
+
             case 'process_missing_products':
                 $productService = $this->requireDependency($dependencies, 'product_service');
                 return $productService->processMissingPage($task, $settings);
@@ -104,7 +108,7 @@ class TaskRunner {
             // импорта: сначала нужно на живом API подтвердить формат productfolder
             // через moysklad_sync_api_debug.log. Товары при этом импортируются
             // только из отчета положительных остатков выбранного склада.
-            'import' => ['init', 'sync_categories', 'rebuild_category_tree', 'sync_products', 'process_missing_products', 'process_missing_categories', 'finish'],
+            'import' => ['init', 'sync_categories', 'rebuild_category_tree', 'sync_products', 'sync_incoming_products', 'process_missing_products', 'finish'],
             'stock' => ['init', 'sync_stock', 'finish'],
             'images' => ['init', 'sync_images', 'finish'],
             default => []

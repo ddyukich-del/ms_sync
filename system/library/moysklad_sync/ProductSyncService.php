@@ -33,13 +33,13 @@ class ProductSyncService {
         $taskId = (int)$task['task_id'];
         $limit = max(1, (int)$task['limit_value']);
         $offset = max(0, (int)$task['offset_value']);
-        $warehouseId = trim((string)($settings['module_moysklad_sync_warehouse_id'] ?? ''));
+        $warehouseIds = $this->normalizeWarehouseIds($settings);
 
-        if ($warehouseId === '') {
-            throw new \RuntimeException('Не выбран склад МойСклад для импорта товаров.');
+        if (!$warehouseIds) {
+            throw new \RuntimeException('Не выбраны склады МойСклад для импорта товаров.');
         }
 
-        $page = $this->client->getStockPage($warehouseId, $limit, $offset);
+        $page = $this->client->getStockPageForWarehouses($warehouseIds, $limit, $offset);
         $rows = $page['rows'];
         $total = (int)$page['total'];
 
@@ -76,8 +76,20 @@ class ProductSyncService {
                     continue;
                 }
 
+                // Если тот же товар уже встретился в текущей задаче на другом
+                // выбранном складе, не загружаем карточку повторно. Просто прибавляем
+                // остаток этого склада к уже созданному/обновленному товару.
+                if (method_exists($this->productModel, 'wasSeenInTask') && $this->productModel->wasSeenInTask($moyskladId, $taskId)) {
+                    $result = method_exists($this->productModel, 'addStockQuantityFromMoysklad')
+                        ? $this->productModel->addStockQuantityFromMoysklad($stockRow, $taskId, $settings)
+                        : 'skipped';
+                    $stats['processed_items']++;
+                    $this->accumulateResult($stats, $result);
+                    continue;
+                }
+
                 // Карточку товара загружаем только после того, как убедились, что на
-                // выбранном складе есть положительный остаток. Это главный фильтр,
+                // выбранных складах есть положительный остаток. Это главный фильтр,
                 // который отсекает товары с других складов.
                 $product = $this->client->getProductById($moyskladId);
                 $product['quantity'] = $stock;
@@ -166,8 +178,8 @@ class ProductSyncService {
         $this->taskModel->updateTaskProgress($taskId, $newOffset, $stats, $total);
 
         if (!$hasMore) {
-            $this->taskModel->addLog($taskId, 'info', 'product', null, 'Импорт товаров выбранного склада завершен. Переходим к обработке товаров, которых нет на выбранном складе.');
-            $this->taskModel->moveToStep($taskId, 'process_missing_products', (int)($settings['module_moysklad_sync_product_batch_size'] ?? $limit));
+            $this->taskModel->addLog($taskId, 'info', 'product', null, 'Импорт товаров выбранного склада завершен. Переходим к учету заказов поставщикам.');
+            $this->taskModel->moveToStep($taskId, 'sync_incoming_products', (int)($settings['module_moysklad_sync_product_batch_size'] ?? $limit));
         }
 
         return $this->taskModel->getTask($taskId) ?: [];
@@ -202,6 +214,34 @@ class ProductSyncService {
         }
 
         return $this->taskModel->getTask($taskId) ?: [];
+    }
+
+    private function normalizeWarehouseIds(array $settings): array {
+        $ids = [];
+        $raw = $settings['module_moysklad_sync_warehouse_ids'] ?? [];
+
+        if (is_string($raw)) {
+            $decoded = json_decode($raw, true);
+            $raw = is_array($decoded) ? $decoded : [$raw];
+        }
+
+        if (is_array($raw)) {
+            foreach ($raw as $id) {
+                $id = trim((string)$id);
+                if ($id !== '') {
+                    $ids[$id] = $id;
+                }
+            }
+        }
+
+        if (!$ids && !empty($settings['module_moysklad_sync_warehouse_id'])) {
+            $id = trim((string)$settings['module_moysklad_sync_warehouse_id']);
+            if ($id !== '') {
+                $ids[$id] = $id;
+            }
+        }
+
+        return array_values($ids);
     }
 
     private function accumulateResult(array &$stats, string $result): void {

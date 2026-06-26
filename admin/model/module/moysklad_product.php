@@ -47,6 +47,9 @@ class MoyskladProduct extends \Opencart\System\Engine\Model {
             'model' => $data['model'],
             'sku' => $data['sku'],
             'category_moysklad_id' => $data['category_moysklad_id'],
+            'stock_status_id' => $data['stock_status_id'],
+            'is_incoming' => $data['is_incoming'],
+            'incoming_quantity' => $data['incoming_quantity'],
             'manufacturer_name' => $data['manufacturer_name'],
             'weight' => $data['weight'],
             'attributes' => $data['attributes'],
@@ -78,6 +81,14 @@ class MoyskladProduct extends \Opencart\System\Engine\Model {
         $this->touchLink($moyskladId, $product, $taskId);
 
         if ((string)$link['last_hash'] === $hash) {
+            // В режиме нескольких складов первый склад текущей задачи должен
+            // сбросить quantity к своему остатку, а следующие склады прибавят свои
+            // остатки через addStockQuantityFromMoysklad(). Иначе при повторном
+            // импорте можно получить задвоение количества.
+            if ($data['quantity_known'] && !$data['is_incoming']) {
+                $this->setProductStockQuantity($productId, (int)floor((float)$data['quantity']));
+            }
+
             // Даже если данные товара не изменились, связь товара с категорией
             // может отсутствовать: например, категории были удалены вручную и
             // затем пересозданы, либо ранняя версия модуля импортировала товары
@@ -126,8 +137,10 @@ class MoyskladProduct extends \Opencart\System\Engine\Model {
                     $stats['deleted']++;
                 } elseif ($action === 'disable') {
                     $this->disableProduct($productId);
+                    $this->markProductLinkMissing($productId);
                     $stats['disabled']++;
                 } else {
+                    $this->markProductLinkMissing($productId);
                     $stats['skipped']++;
                 }
             } catch (\Throwable $e) {
@@ -220,6 +233,68 @@ class MoyskladProduct extends \Opencart\System\Engine\Model {
     }
 
     /**
+     * Прибавляет остаток еще одного выбранного склада к товару, который уже
+     * был обработан в текущей задаче.
+     *
+     * Это нужно для режима нескольких складов: один и тот же товар может быть
+     * найден на складе А и складе Б. Первое появление создает/обновляет товар,
+     * последующие появления должны суммировать quantity, а не перезаписывать его.
+     */
+    public function addStockQuantityFromMoysklad(array $stockRow, int $taskId, array $settings): string {
+        $moyskladId = trim((string)($stockRow['id'] ?? ''));
+        $addQuantity = max(0, (int)floor((float)($stockRow['stock'] ?? 0)));
+
+        if ($moyskladId === '' || $addQuantity <= 0) {
+            return 'skipped';
+        }
+
+        $link = $this->getLinkByMoyskladId($moyskladId);
+        if (!$link) {
+            return 'skipped';
+        }
+
+        $productId = (int)$link['product_id'];
+        $current = $this->db->query("SELECT `quantity` FROM `" . DB_PREFIX . "product`
+            WHERE `product_id` = '" . (int)$productId . "'
+            LIMIT 1");
+
+        if (!$current->num_rows) {
+            return 'skipped';
+        }
+
+        $newQuantity = max(0, (int)$current->row['quantity']) + $addQuantity;
+        $fields = $this->filterExistingColumns('product', [
+            'quantity' => $newQuantity,
+            'status' => 1,
+            'date_modified' => date('Y-m-d H:i:s')
+        ]);
+
+        $this->db->query("UPDATE `" . DB_PREFIX . "product` SET " . $this->buildSqlSet($fields) . "
+            WHERE `product_id` = '" . (int)$productId . "'");
+
+        $linkFields = [
+            'article' => (string)($stockRow['article'] ?? ''),
+            'sync_source' => 'stock',
+            'incoming_quantity' => null,
+            'purchase_order_id' => null,
+            'purchase_order_name' => null,
+            'purchase_order_state_id' => null,
+            'purchase_order_state_name' => null,
+            'last_stock_quantity' => $newQuantity,
+            'last_seen_task_id' => $taskId,
+            'last_seen_at' => date('Y-m-d H:i:s'),
+            'last_synced_at' => date('Y-m-d H:i:s'),
+            'updated_at' => date('Y-m-d H:i:s'),
+        ];
+
+        $linkFields = $this->filterExistingColumns('moysklad_product_link', $linkFields);
+        $this->db->query("UPDATE `" . DB_PREFIX . "moysklad_product_link` SET " . $this->buildSqlSet($linkFields) . "
+            WHERE `moysklad_id` = '" . $this->db->escape($moyskladId) . "'");
+
+        return 'updated';
+    }
+
+    /**
      * Отмечает, что по товару прошла синхронизация остатков.
      *
      * last_seen_task_id здесь не трогаем: это поле используется полным импортом
@@ -227,11 +302,44 @@ class MoyskladProduct extends \Opencart\System\Engine\Model {
      * отдельный отчет, поэтому смешивать эти маркеры нельзя.
      */
     private function touchStockSync(string $moyskladId, array $stockRow, int $taskId): void {
-        $this->db->query("UPDATE `" . DB_PREFIX . "moysklad_product_link` SET
-            `article` = COALESCE(NULLIF('" . $this->db->escape((string)($stockRow['article'] ?? '')) . "', ''), `article`),
-            `last_synced_at` = NOW(),
-            `updated_at` = NOW()
+        $stock = isset($stockRow['stock']) && is_numeric($stockRow['stock']) ? (float)$stockRow['stock'] : 0.0;
+        $fields = [
+            'article' => (string)($stockRow['article'] ?? ''),
+            'sync_source' => $stock > 0 ? 'stock' : 'missing',
+            'incoming_quantity' => null,
+            'purchase_order_id' => null,
+            'purchase_order_name' => null,
+            'purchase_order_state_id' => null,
+            'purchase_order_state_name' => null,
+            'last_stock_quantity' => $stock,
+            'last_seen_task_id' => $taskId,
+            'last_seen_at' => date('Y-m-d H:i:s'),
+            'last_synced_at' => date('Y-m-d H:i:s'),
+            'updated_at' => date('Y-m-d H:i:s'),
+        ];
+
+        $fields = $this->filterExistingColumns('moysklad_product_link', $fields);
+
+        $this->db->query("UPDATE `" . DB_PREFIX . "moysklad_product_link` SET " . $this->buildSqlSet($fields) . "
             WHERE `moysklad_id` = '" . $this->db->escape($moyskladId) . "'");
+    }
+
+    private function markProductLinkMissing(int $productId): void {
+        $fields = [
+            'sync_source' => 'missing',
+            'incoming_quantity' => null,
+            'purchase_order_id' => null,
+            'purchase_order_name' => null,
+            'purchase_order_state_id' => null,
+            'purchase_order_state_name' => null,
+            'last_stock_quantity' => 0,
+            'updated_at' => date('Y-m-d H:i:s'),
+        ];
+
+        $fields = $this->filterExistingColumns('moysklad_product_link', $fields);
+
+        $this->db->query("UPDATE `" . DB_PREFIX . "moysklad_product_link` SET " . $this->buildSqlSet($fields) . "
+            WHERE `product_id` = '" . (int)$productId . "'");
     }
 
     private function mapProductData(array $product, array $settings): array {
@@ -258,6 +366,17 @@ class MoyskladProduct extends \Opencart\System\Engine\Model {
             'quantity' => !empty($product['quantity_known']) ? max(0, (float)$product['quantity']) : 0,
             'quantity_known' => !empty($product['quantity_known']),
             'status' => $status,
+            // Для ожидаемых товаров по заказам поставщикам можно назначить
+            // отдельный stock_status_id, например «Предзаказ» или «Ожидается».
+            // Сам товар при этом остается включенным, но quantity по умолчанию 0.
+            'stock_status_id' => isset($product['stock_status_id']) && is_numeric($product['stock_status_id']) ? (int)$product['stock_status_id'] : $this->getOutOfStockStatusId(),
+            'is_incoming' => !empty($product['is_incoming']),
+            'incoming_quantity' => isset($product['incoming_quantity']) && is_numeric($product['incoming_quantity']) ? (float)$product['incoming_quantity'] : 0.0,
+            'sync_source' => !empty($product['is_incoming']) ? 'incoming' : 'stock',
+            'purchase_order_id' => (string)($product['purchase_order_id'] ?? ''),
+            'purchase_order_name' => (string)($product['purchase_order_name'] ?? ''),
+            'purchase_order_state_id' => (string)($product['purchase_order_state_id'] ?? ''),
+            'purchase_order_state_name' => (string)($product['purchase_order_state_name'] ?? ''),
             'category_moysklad_id' => (string)($product['category_id'] ?? ''),
             'manufacturer_name' => trim((string)($product['manufacturer_name'] ?? '')),
             'weight' => isset($product['weight']) && is_numeric($product['weight']) ? (float)$product['weight'] : 0.0,
@@ -356,7 +475,7 @@ class MoyskladProduct extends \Opencart\System\Engine\Model {
         // не обнулить каталог. Для нового товара без известного остатка ставим 0.
         if ($isCreate || !empty($data['quantity_known'])) {
             $fields['quantity'] = !empty($data['quantity_known']) ? (int)floor((float)$data['quantity']) : 0;
-            $fields['stock_status_id'] = $this->getOutOfStockStatusId();
+            $fields['stock_status_id'] = (int)($data['stock_status_id'] ?? $this->getOutOfStockStatusId());
         }
 
         if ($isCreate) {
@@ -595,42 +714,96 @@ class MoyskladProduct extends \Opencart\System\Engine\Model {
     }
 
     private function saveLink(int $productId, array $product, string $hash, int $taskId): void {
-        $this->db->query("INSERT INTO `" . DB_PREFIX . "moysklad_product_link` SET
-            `product_id` = '" . (int)$productId . "',
-            `moysklad_id` = '" . $this->db->escape((string)$product['id']) . "',
-            `moysklad_href` = '" . $this->db->escape((string)($product['href'] ?? '')) . "',
-            `external_code` = '" . $this->db->escape((string)($product['external_code'] ?? '')) . "',
-            `article` = '" . $this->db->escape((string)($product['article'] ?? '')) . "',
-            `last_hash` = '" . $this->db->escape($hash) . "',
-            `last_seen_task_id` = '" . (int)$taskId . "',
-            `last_seen_at` = NOW(),
-            `last_synced_at` = NOW(),
-            `created_at` = NOW(),
-            `updated_at` = NOW()");
+        $fields = array_merge([
+            'product_id' => $productId,
+            'moysklad_id' => (string)$product['id'],
+            'last_hash' => $hash,
+            'last_seen_task_id' => $taskId,
+            'last_seen_at' => date('Y-m-d H:i:s'),
+            'last_synced_at' => date('Y-m-d H:i:s'),
+            'created_at' => date('Y-m-d H:i:s'),
+            'updated_at' => date('Y-m-d H:i:s'),
+        ], $this->buildLinkMetaFields($product));
+
+        $fields = $this->filterExistingColumns('moysklad_product_link', $fields);
+
+        $this->db->query("INSERT INTO `" . DB_PREFIX . "moysklad_product_link` SET " . $this->buildSqlSet($fields));
     }
 
     private function touchLink(string $moyskladId, array $product, int $taskId): void {
-        $this->db->query("UPDATE `" . DB_PREFIX . "moysklad_product_link` SET
-            `moysklad_href` = '" . $this->db->escape((string)($product['href'] ?? '')) . "',
-            `external_code` = '" . $this->db->escape((string)($product['external_code'] ?? '')) . "',
-            `article` = '" . $this->db->escape((string)($product['article'] ?? '')) . "',
-            `last_seen_task_id` = '" . (int)$taskId . "',
-            `last_seen_at` = NOW(),
-            `updated_at` = NOW()
+        $fields = array_merge($this->buildLinkMetaFields($product), [
+            'last_seen_task_id' => $taskId,
+            'last_seen_at' => date('Y-m-d H:i:s'),
+            'updated_at' => date('Y-m-d H:i:s'),
+        ]);
+
+        $fields = $this->filterExistingColumns('moysklad_product_link', $fields);
+
+        $this->db->query("UPDATE `" . DB_PREFIX . "moysklad_product_link` SET " . $this->buildSqlSet($fields) . "
             WHERE `moysklad_id` = '" . $this->db->escape($moyskladId) . "'");
     }
 
     private function updateLinkHash(string $moyskladId, array $product, string $hash, int $taskId): void {
-        $this->db->query("UPDATE `" . DB_PREFIX . "moysklad_product_link` SET
-            `moysklad_href` = '" . $this->db->escape((string)($product['href'] ?? '')) . "',
-            `external_code` = '" . $this->db->escape((string)($product['external_code'] ?? '')) . "',
-            `article` = '" . $this->db->escape((string)($product['article'] ?? '')) . "',
-            `last_hash` = '" . $this->db->escape($hash) . "',
-            `last_seen_task_id` = '" . (int)$taskId . "',
-            `last_seen_at` = NOW(),
-            `last_synced_at` = NOW(),
-            `updated_at` = NOW()
+        $fields = array_merge($this->buildLinkMetaFields($product), [
+            'last_hash' => $hash,
+            'last_seen_task_id' => $taskId,
+            'last_seen_at' => date('Y-m-d H:i:s'),
+            'last_synced_at' => date('Y-m-d H:i:s'),
+            'updated_at' => date('Y-m-d H:i:s'),
+        ]);
+
+        $fields = $this->filterExistingColumns('moysklad_product_link', $fields);
+
+        $this->db->query("UPDATE `" . DB_PREFIX . "moysklad_product_link` SET " . $this->buildSqlSet($fields) . "
             WHERE `moysklad_id` = '" . $this->db->escape($moyskladId) . "'");
+    }
+
+    /**
+     * Формирует служебные поля статуса синхронизации товара.
+     *
+     * Эти данные нужны не для витрины, а для админки: по ним сразу видно, товар
+     * пришел из реального остатка выбранного склада или оставлен на сайте как
+     * ожидаемый по заказу поставщику. В стандартных таблицах ocStore такого
+     * признака нет, поэтому храним его в таблице связей МойСклад.
+     */
+    private function buildLinkMetaFields(array $product): array {
+        $isIncoming = !empty($product['is_incoming']);
+        $quantityKnown = !empty($product['quantity_known']);
+        $quantity = $quantityKnown && isset($product['quantity']) && is_numeric($product['quantity']) ? (float)$product['quantity'] : null;
+        $incomingQuantity = isset($product['incoming_quantity']) && is_numeric($product['incoming_quantity']) ? (float)$product['incoming_quantity'] : 0.0;
+
+        return [
+            'moysklad_href' => (string)($product['href'] ?? ''),
+            'external_code' => (string)($product['external_code'] ?? ''),
+            'article' => (string)($product['article'] ?? ''),
+            'name_key' => $this->normalizeNameKey((string)($product['name'] ?? '')),
+            'sync_source' => $isIncoming ? 'incoming' : 'stock',
+            'incoming_quantity' => $isIncoming ? $incomingQuantity : null,
+            'purchase_order_id' => $isIncoming ? (string)($product['purchase_order_id'] ?? '') : null,
+            'purchase_order_name' => $isIncoming ? (string)($product['purchase_order_name'] ?? '') : null,
+            'purchase_order_state_id' => $isIncoming ? (string)($product['purchase_order_state_id'] ?? '') : null,
+            'purchase_order_state_name' => $isIncoming ? (string)($product['purchase_order_state_name'] ?? '') : null,
+            'last_stock_quantity' => $isIncoming ? null : $quantity,
+        ];
+    }
+
+    private function setProductStockQuantity(int $productId, int $quantity): void {
+        if ($productId <= 0) {
+            return;
+        }
+
+        $fields = $this->filterExistingColumns('product', [
+            'quantity' => max(0, $quantity),
+            'status' => $quantity > 0 ? 1 : 0,
+            'date_modified' => date('Y-m-d H:i:s')
+        ]);
+
+        if (!$fields) {
+            return;
+        }
+
+        $this->db->query("UPDATE `" . DB_PREFIX . "product` SET " . $this->buildSqlSet($fields) . "
+            WHERE `product_id` = '" . (int)$productId . "'");
     }
 
     /**
@@ -659,17 +832,329 @@ class MoyskladProduct extends \Opencart\System\Engine\Model {
      * Мы не вставляем новую строку связи, чтобы не упереться в уникальный moysklad_id.
      */
     private function relinkExistingMoyskladLink(string $moyskladId, int $newProductId, array $product, string $hash, int $taskId): void {
-        $this->db->query("UPDATE `" . DB_PREFIX . "moysklad_product_link` SET
-            `product_id` = '" . (int)$newProductId . "',
-            `moysklad_href` = '" . $this->db->escape((string)($product['href'] ?? '')) . "',
-            `external_code` = '" . $this->db->escape((string)($product['external_code'] ?? '')) . "',
-            `article` = '" . $this->db->escape((string)($product['article'] ?? '')) . "',
-            `last_hash` = '" . $this->db->escape($hash) . "',
-            `last_seen_task_id` = '" . (int)$taskId . "',
-            `last_seen_at` = NOW(),
-            `last_synced_at` = NOW(),
-            `updated_at` = NOW()
+        $fields = array_merge($this->buildLinkMetaFields($product), [
+            'product_id' => $newProductId,
+            'last_hash' => $hash,
+            'last_seen_task_id' => $taskId,
+            'last_seen_at' => date('Y-m-d H:i:s'),
+            'last_synced_at' => date('Y-m-d H:i:s'),
+            'updated_at' => date('Y-m-d H:i:s'),
+        ]);
+
+        $fields = $this->filterExistingColumns('moysklad_product_link', $fields);
+
+        $this->db->query("UPDATE `" . DB_PREFIX . "moysklad_product_link` SET " . $this->buildSqlSet($fields) . "
             WHERE `moysklad_id` = '" . $this->db->escape($moyskladId) . "'");
+    }
+
+
+    /**
+     * Проверяет, был ли товар уже импортирован/обновлен в текущей задаче.
+     *
+     * Это нужно для учета заказов поставщикам: если товар уже пришел из отчета
+     * положительных остатков выбранного склада, заказ поставщику не должен
+     * перезаписать его реальный quantity на 0 или ожидаемое количество.
+     */
+    public function wasSeenInTask(string $moyskladId, int $taskId): bool {
+        $query = $this->db->query("SELECT `product_id` FROM `" . DB_PREFIX . "moysklad_product_link`
+            WHERE `moysklad_id` = '" . $this->db->escape($moyskladId) . "'
+              AND `last_seen_task_id` = '" . (int)$taskId . "'
+            LIMIT 1");
+
+        return (bool)$query->num_rows;
+    }
+
+    /**
+     * Возвращает компактный список синхронизированных товаров для админки модуля.
+     *
+     * Это не стандартный каталог ocStore, а контрольная таблица интеграции:
+     * по ней видно, откуда товар попал на сайт — с реального остатка выбранного
+     * склада или из заказа поставщику. Запрос ограничен лимитом, чтобы страница
+     * настроек не грузила слабый сервер на больших каталогах.
+     */
+    public function getSyncProductsForAdmin(array $filter = [], string $sort = 'product', string $order = 'ASC', int $limit = 150): array {
+        $limit = max(1, min(10000, $limit));
+        $languageId = $this->getRussianLanguageId();
+        $stockStatusJoin = $this->tableExists('stock_status') ? "LEFT JOIN `" . DB_PREFIX . "stock_status` ss ON (ss.`stock_status_id` = p.`stock_status_id` AND ss.`language_id` = '" . (int)$languageId . "')" : '';
+
+        // Фильтры и сортировка выполняются на стороне SQL, а не в браузере.
+        // Это важно для больших каталогов: в админку не нужно отдавать тысячи строк,
+        // чтобы потом скрывать их JavaScript-ом на слабом компьютере администратора.
+        $where = [];
+
+        $search = trim((string)($filter['search'] ?? ''));
+        if ($search !== '') {
+            $escaped = $this->db->escape($search);
+            $like = "LIKE '%" . $escaped . "%'";
+            $where[] = "(pd.`name` " . $like . " OR l.`article` " . $like . " OR l.`purchase_order_name` " . $like . " OR l.`purchase_order_state_name` " . $like . ")";
+        }
+
+        $source = (string)($filter['source'] ?? '');
+        if (in_array($source, ['stock', 'incoming', 'stock_incoming', 'missing', 'unknown'], true)) {
+            $where[] = "l.`sync_source` = '" . $this->db->escape($source) . "'";
+        }
+
+        $status = (string)($filter['status'] ?? '');
+        if ($status === 'enabled') {
+            $where[] = "p.`status` = '1'";
+        } elseif ($status === 'disabled') {
+            $where[] = "(p.`status` = '0' OR p.`status` IS NULL)";
+        }
+
+        $quantity = (string)($filter['quantity'] ?? '');
+        if ($quantity === 'positive') {
+            $where[] = "COALESCE(p.`quantity`, 0) > 0";
+        } elseif ($quantity === 'zero') {
+            $where[] = "COALESCE(p.`quantity`, 0) <= 0";
+        }
+
+        $expected = (string)($filter['expected'] ?? '');
+        if ($expected === 'positive') {
+            $where[] = "COALESCE(l.`incoming_quantity`, 0) > 0";
+        } elseif ($expected === 'zero') {
+            $where[] = "COALESCE(l.`incoming_quantity`, 0) <= 0";
+        }
+
+        $orderState = trim((string)($filter['order_state'] ?? ''));
+        if ($orderState !== '') {
+            $where[] = "l.`purchase_order_state_name` LIKE '%" . $this->db->escape($orderState) . "%'";
+        }
+
+        $whereSql = $where ? 'WHERE ' . implode(' AND ', $where) : '';
+
+        $sortMap = [
+            'product' => "pd.`name`",
+            'article' => "l.`article`",
+            'source' => "CASE l.`sync_source` WHEN 'stock_incoming' THEN 1 WHEN 'stock' THEN 2 WHEN 'incoming' THEN 3 WHEN 'missing' THEN 4 ELSE 5 END",
+            'quantity' => "COALESCE(p.`quantity`, 0)",
+            'expected' => "COALESCE(l.`incoming_quantity`, 0)",
+            'stock_status' => ($stockStatusJoin ? "ss.`name`" : "p.`stock_status_id`"),
+            'purchase_order' => "l.`purchase_order_name`",
+            'updated' => "l.`last_synced_at`",
+            'id' => "l.`product_id`"
+        ];
+
+        $sortSql = $sortMap[$sort] ?? $sortMap['source'];
+        $orderSql = strtoupper($order) === 'DESC' ? 'DESC' : 'ASC';
+
+        $query = $this->db->query("SELECT
+                l.`product_id`,
+                l.`moysklad_id`,
+                l.`article`,
+                l.`sync_source`,
+                l.`incoming_quantity`,
+                l.`purchase_order_name`,
+                l.`purchase_order_state_name`,
+                l.`last_stock_quantity`,
+                l.`last_synced_at`,
+                p.`quantity`,
+                p.`status`,
+                p.`stock_status_id`,
+                pd.`name` AS product_name,
+                " . ($stockStatusJoin ? "ss.`name`" : "''") . " AS stock_status_name
+            FROM `" . DB_PREFIX . "moysklad_product_link` l
+            LEFT JOIN `" . DB_PREFIX . "product` p ON (p.`product_id` = l.`product_id`)
+            LEFT JOIN `" . DB_PREFIX . "product_description` pd ON (pd.`product_id` = l.`product_id` AND pd.`language_id` = '" . (int)$languageId . "')
+            " . $stockStatusJoin . "
+            " . $whereSql . "
+            ORDER BY " . $sortSql . " " . $orderSql . ", pd.`name` ASC
+            LIMIT " . (int)$limit);
+
+        $rows = [];
+
+        foreach ($query->rows as $row) {
+            $rows[] = [
+                'product_id' => (int)$row['product_id'],
+                'moysklad_id' => (string)$row['moysklad_id'],
+                'name' => (string)($row['product_name'] ?: ('#' . (int)$row['product_id'])),
+                'article' => (string)($row['article'] ?? ''),
+                'quantity' => isset($row['quantity']) ? (int)$row['quantity'] : null,
+                'status' => isset($row['status']) ? (int)$row['status'] : null,
+                'stock_status_id' => isset($row['stock_status_id']) ? (int)$row['stock_status_id'] : null,
+                'stock_status_name' => (string)($row['stock_status_name'] ?? ''),
+                'sync_source' => (string)($row['sync_source'] ?? 'unknown'),
+                'incoming_quantity' => $row['incoming_quantity'] !== null ? (float)$row['incoming_quantity'] : null,
+                'purchase_order_name' => (string)($row['purchase_order_name'] ?? ''),
+                'purchase_order_state_name' => (string)($row['purchase_order_state_name'] ?? ''),
+                'last_stock_quantity' => $row['last_stock_quantity'] !== null ? (float)$row['last_stock_quantity'] : null,
+                'last_synced_at' => (string)($row['last_synced_at'] ?? ''),
+            ];
+        }
+
+        return $rows;
+    }
+
+
+    /**
+     * Ищет товар сайта, с которым можно объединить позицию из заказа поставщику.
+     *
+     * Объединяем только с товаром, который уже встретился в текущей задаче как
+     * фактический складской товар. Это защищает от случайной склейки с устаревшими
+     * или отключенными карточками прошлых импортов.
+     */
+    public function findMergeTargetProductIdByName(string $name, int $taskId): int {
+        $nameKey = $this->normalizeNameKey($name);
+
+        if ($nameKey === '') {
+            return 0;
+        }
+
+        if (!$this->columnExists('moysklad_product_link', 'name_key')) {
+            return 0;
+        }
+
+        $query = $this->db->query("SELECT l.`product_id`
+            FROM `" . DB_PREFIX . "moysklad_product_link` l
+            INNER JOIN `" . DB_PREFIX . "product` p ON (p.`product_id` = l.`product_id`)
+            WHERE l.`name_key` = '" . $this->db->escape($nameKey) . "'
+              AND l.`last_seen_task_id` = '" . (int)$taskId . "'
+              AND l.`sync_source` IN ('stock', 'stock_incoming')
+              AND p.`quantity` > 0
+            ORDER BY p.`quantity` DESC, l.`product_id` ASC
+            LIMIT 1");
+
+        return $query->num_rows ? (int)$query->row['product_id'] : 0;
+    }
+
+    /**
+     * Добавляет ожидаемое количество к уже существующему товару по ID МойСклад.
+     * Используется, когда товар одновременно есть в остатках и в заказе поставщику
+     * под тем же самым ID: фактический quantity не трогаем, но в админке показываем
+     * дополнительное ожидаемое количество.
+     */
+    public function attachIncomingToProductByMoyskladId(string $moyskladId, array $incomingProduct, int $taskId): string {
+        $link = $this->getLinkByMoyskladId($moyskladId);
+
+        if (!$link || empty($link['product_id'])) {
+            return 'skipped';
+        }
+
+        return $this->attachIncomingToProductId((int)$link['product_id'], $incomingProduct, $taskId);
+    }
+
+    /**
+     * Добавляет данные заказа поставщику к выбранной карточке товара сайта.
+     *
+     * Это ядро режима «объединять по наименованию»: отдельный товар из заказа
+     * поставщику не создается. Вместо этого у складского товара появляется
+     * incoming_quantity и источник «В наличии + заказ поставщику».
+     */
+    public function attachIncomingToProductId(int $productId, array $incomingProduct, int $taskId): string {
+        if ($productId <= 0) {
+            return 'skipped';
+        }
+
+        $incomingQuantity = isset($incomingProduct['incoming_quantity']) && is_numeric($incomingProduct['incoming_quantity'])
+            ? max(0.0, (float)$incomingProduct['incoming_quantity'])
+            : 0.0;
+
+        if ($incomingQuantity <= 0) {
+            return 'skipped';
+        }
+
+        $query = $this->db->query("SELECT * FROM `" . DB_PREFIX . "moysklad_product_link`
+            WHERE `product_id` = '" . (int)$productId . "'
+            LIMIT 1");
+
+        if (!$query->num_rows) {
+            return 'skipped';
+        }
+
+        $link = $query->row;
+        $currentIncoming = isset($link['incoming_quantity']) && is_numeric($link['incoming_quantity']) ? (float)$link['incoming_quantity'] : 0.0;
+        $newIncoming = $currentIncoming + $incomingQuantity;
+
+        $orderName = $this->appendUniqueListValue((string)($link['purchase_order_name'] ?? ''), (string)($incomingProduct['purchase_order_name'] ?? ''));
+        $stateName = $this->appendUniqueListValue((string)($link['purchase_order_state_name'] ?? ''), (string)($incomingProduct['purchase_order_state_name'] ?? ''));
+        $orderId = $this->appendUniqueListValue((string)($link['purchase_order_id'] ?? ''), (string)($incomingProduct['purchase_order_id'] ?? ''));
+        $stateId = $this->appendUniqueListValue((string)($link['purchase_order_state_id'] ?? ''), (string)($incomingProduct['purchase_order_state_id'] ?? ''));
+
+        $fields = [
+            'sync_source' => 'stock_incoming',
+            'incoming_quantity' => $newIncoming,
+            'purchase_order_id' => $orderId,
+            'purchase_order_name' => $orderName,
+            'purchase_order_state_id' => $stateId,
+            'purchase_order_state_name' => $stateName,
+            'last_seen_task_id' => $taskId,
+            'last_seen_at' => date('Y-m-d H:i:s'),
+            'last_synced_at' => date('Y-m-d H:i:s'),
+            'updated_at' => date('Y-m-d H:i:s'),
+        ];
+
+        // Если у старой записи еще не был заполнен name_key, заполним его по
+        // текущему названию товара. Это помогает будущим импортам находить совпадения.
+        if ($this->columnExists('moysklad_product_link', 'name_key') && empty($link['name_key'])) {
+            $name = trim((string)($incomingProduct['merge_target_name'] ?? $incomingProduct['name'] ?? ''));
+            if ($name !== '') {
+                $fields['name_key'] = $this->normalizeNameKey($name);
+            }
+        }
+
+        $fields = $this->filterExistingColumns('moysklad_product_link', $fields);
+
+        if (!$fields) {
+            return 'skipped';
+        }
+
+        $this->db->query("UPDATE `" . DB_PREFIX . "moysklad_product_link` SET " . $this->buildSqlSet($fields) . "
+            WHERE `product_id` = '" . (int)$productId . "'");
+
+        // Товар, который уже есть на складе, должен оставаться включенным. Quantity
+        // не меняем: это фактический остаток по выбранным складам.
+        $productFields = $this->filterExistingColumns('product', [
+            'status' => 1,
+            'date_modified' => date('Y-m-d H:i:s')
+        ]);
+
+        if ($productFields) {
+            $this->db->query("UPDATE `" . DB_PREFIX . "product` SET " . $this->buildSqlSet($productFields) . "
+                WHERE `product_id` = '" . (int)$productId . "'");
+        }
+
+        return 'updated';
+    }
+
+    private function appendUniqueListValue(string $existing, string $value): string {
+        $value = trim($value);
+        $existing = trim($existing);
+
+        if ($value === '') {
+            return $existing;
+        }
+
+        if ($existing === '') {
+            return $value;
+        }
+
+        $parts = array_filter(array_map('trim', explode(';', $existing)), static fn($item) => $item !== '');
+        $lookup = [];
+
+        foreach ($parts as $part) {
+            $lookup[mb_strtolower($part, 'UTF-8')] = true;
+        }
+
+        $key = mb_strtolower($value, 'UTF-8');
+        if (empty($lookup[$key])) {
+            $parts[] = $value;
+        }
+
+        return implode('; ', $parts);
+    }
+
+    private function normalizeNameKey(string $name): string {
+        $name = trim($name);
+
+        if ($name === '') {
+            return '';
+        }
+
+        $name = str_replace('ё', 'е', mb_strtolower($name, 'UTF-8'));
+        $name = str_replace('Ё', 'е', $name);
+        $name = preg_replace('~\s+~u', ' ', $name) ?: $name;
+        $name = trim($name);
+
+        return mb_substr($name, 0, 191, 'UTF-8');
     }
 
     private function getLinkByMoyskladId(string $moyskladId): ?array {

@@ -8,6 +8,7 @@ use MoyskladSync\CategorySyncService;
 use MoyskladSync\ProductSyncService;
 use MoyskladSync\StockSyncService;
 use MoyskladSync\ImageSyncService;
+use MoyskladSync\PurchaseOrderSyncService;
 use MoyskladSync\TaskRunner;
 
 class MoyskladSync extends \Opencart\System\Engine\Controller {
@@ -81,6 +82,12 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
                 break;
             case 'get_task_status':
                 $this->getTaskStatus();
+                break;
+            case 'get_product_statuses':
+                $this->getProductStatuses();
+                break;
+            case 'export_product_statuses':
+                $this->exportProductStatuses();
                 break;
             case 'stop_task':
                 $this->stopTask();
@@ -177,6 +184,16 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
             $json['success'] = $this->language->get('text_dictionaries_loaded');
             $json['warehouses'] = $client->getWarehouses(100);
             $json['price_types'] = $client->getPriceTypes();
+
+            try {
+                $json['purchase_order_states'] = $client->getPurchaseOrderStates();
+            } catch (\Throwable $stateError) {
+                // Не ломаем загрузку складов и цен, если в конкретном аккаунте или
+                // тарифе МойСклад статусы заказов поставщикам недоступны. Администратор
+                // увидит пустой список и сможет оставить учет закупок выключенным.
+                $json['purchase_order_states'] = [];
+                $json['purchase_order_states_error'] = $stateError->getMessage();
+            }
         } catch (ApiException $e) {
             $json['error'] = $this->formatApiError($e);
         } catch (\Throwable $e) {
@@ -272,12 +289,19 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
                 $this->model_extension_moysklad_sync_module_moysklad_image,
                 $this->model_extension_moysklad_sync_module_moysklad_task
             );
+            $purchaseOrderService = new PurchaseOrderSyncService(
+                $client,
+                $this->model_extension_moysklad_sync_module_moysklad_product,
+                $this->model_extension_moysklad_sync_module_moysklad_task,
+                $categoryService
+            );
 
             $updatedTask = $runner->runOneStep($lockedTask, $this->model_extension_moysklad_sync_module_moysklad_task, $settings, [
                 'category_service' => $categoryService,
                 'product_service' => $productService,
                 'stock_service' => $stockService,
-                'image_service' => $imageService
+                'image_service' => $imageService,
+                'purchase_order_service' => $purchaseOrderService
             ]);
 
             if (($updatedTask['status'] ?? '') === 'running') {
@@ -288,6 +312,7 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
             $json['success'] = $this->language->get('text_task_step_done');
             $json['task'] = $this->formatTask($updatedTask);
             $json['logs'] = $this->formatLogs($this->model_extension_moysklad_sync_module_moysklad_task->getRecentLogs(20));
+            $json['product_statuses'] = $this->getFormattedProductStatuses();
         } catch (\Throwable $e) {
             $this->model_extension_moysklad_sync_module_moysklad_task->failTask($taskId, $e->getMessage());
 
@@ -310,14 +335,106 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
         }
 
         $this->loadTaskModel();
+        $this->loadProductModel();
 
         $task = $this->model_extension_moysklad_sync_module_moysklad_task->getActiveTask()
             ?: $this->model_extension_moysklad_sync_module_moysklad_task->getLatestTask();
 
         $json['task'] = $this->formatTask($task ?: []);
         $json['logs'] = $this->formatLogs($this->model_extension_moysklad_sync_module_moysklad_task->getRecentLogs(20));
+        $json['product_statuses'] = $this->getFormattedProductStatuses();
 
         $this->sendJson($json);
+    }
+
+    /** AJAX: возвращает список синхронизированных товаров с источником статуса. */
+    public function getProductStatuses(): void {
+        $this->load->language('extension/moysklad_sync/module/moysklad_sync');
+
+        if (!$this->user->hasPermission('access', 'extension/moysklad_sync/module/moysklad_sync')) {
+            $this->sendJson(['error' => $this->language->get('error_permission')]);
+            return;
+        }
+
+        $this->loadProductModel();
+        $this->sendJson(['product_statuses' => $this->getFormattedProductStatusesFromRequest()]);
+    }
+
+    /**
+     * AJAX/GET: выгружает текущий список товаров из вкладки «Товары» в CSV.
+     *
+     * Используем те же фильтры и сортировку, что и на экране, чтобы менеджер
+     * скачивал именно тот срез данных, который он сейчас анализирует в админке.
+     * CSV сделан с BOM и разделителем ';' — так файл нормально открывается
+     * в русской версии Excel без ручного выбора кодировки.
+     */
+    public function exportProductStatuses(): void {
+        $this->load->language('extension/moysklad_sync/module/moysklad_sync');
+
+        if (!$this->user->hasPermission('access', 'extension/moysklad_sync/module/moysklad_sync')) {
+            $this->response->addHeader('Content-Type: text/plain; charset=UTF-8');
+            $this->response->setOutput($this->language->get('error_permission'));
+            return;
+        }
+
+        $this->loadProductModel();
+
+        // Для экспорта берем больше строк, чем выводим в таблицу, но оставляем
+        // разумный верхний предел, чтобы случайный клик не положил слабый хостинг.
+        $limit = (int)($this->request->get['export_limit'] ?? 10000);
+        $limit = max(1, min(10000, $limit));
+
+        $rows = $this->getFormattedProductStatusesFromRequest($limit);
+
+        $handle = fopen('php://temp', 'r+');
+        if ($handle === false) {
+            $this->response->addHeader('Content-Type: text/plain; charset=UTF-8');
+            $this->response->setOutput($this->language->get('error_unexpected') . ' Не удалось создать временный файл экспорта.');
+            return;
+        }
+
+        // UTF-8 BOM для Excel.
+        fwrite($handle, "\xEF\xBB\xBF");
+
+        fputcsv($handle, [
+            $this->language->get('column_product_id'),
+            $this->language->get('column_product'),
+            $this->language->get('column_article'),
+            $this->language->get('column_sync_source'),
+            $this->language->get('column_quantity'),
+            $this->language->get('column_expected_quantity'),
+            $this->language->get('column_stock_status'),
+            $this->language->get('column_purchase_order'),
+            $this->language->get('column_purchase_order_state'),
+            $this->language->get('column_updated')
+        ], ';');
+
+        foreach ($rows as $row) {
+            fputcsv($handle, [
+                (string)($row['product_id'] ?? ''),
+                (string)($row['name'] ?? ''),
+                (string)($row['article'] ?? ''),
+                (string)($row['sync_source_title'] ?? ''),
+                (string)($row['quantity'] ?? ''),
+                (string)($row['expected_quantity'] ?? $row['incoming_quantity'] ?? ''),
+                (string)($row['stock_status_name'] ?? ''),
+                (string)($row['purchase_order_name'] ?? ''),
+                (string)($row['purchase_order_state_name'] ?? ''),
+                (string)($row['last_synced_at'] ?? '')
+            ], ';');
+        }
+
+        rewind($handle);
+        $csv = stream_get_contents($handle);
+        fclose($handle);
+
+        $filename = 'moysklad_products_' . date('Y-m-d_H-i-s') . '.csv';
+
+        $this->response->addHeader('Content-Type: text/csv; charset=UTF-8');
+        $this->response->addHeader('Content-Disposition: attachment; filename="' . $filename . '"');
+        $this->response->addHeader('Pragma: no-cache');
+        $this->response->addHeader('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+        $this->response->setOutput($csv ?: '');
     }
 
     /** AJAX: останавливает активную задачу. */
@@ -340,6 +457,7 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
             $json['success'] = $this->language->get('text_task_stopped');
             $json['task'] = $this->formatTask($task);
             $json['logs'] = $this->formatLogs($this->model_extension_moysklad_sync_module_moysklad_task->getRecentLogs(20));
+            $json['product_statuses'] = $this->getFormattedProductStatuses();
         }
 
         $this->sendJson($json);
@@ -446,6 +564,12 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
             $data[$key] = $value !== null ? $value : $default;
         }
 
+        $data['module_moysklad_sync_warehouse_ids'] = $this->normaliseStringArray($data['module_moysklad_sync_warehouse_ids'] ?? []);
+        if (!$data['module_moysklad_sync_warehouse_ids'] && !empty($data['module_moysklad_sync_warehouse_id'])) {
+            $data['module_moysklad_sync_warehouse_ids'] = [(string)$data['module_moysklad_sync_warehouse_id']];
+        }
+        $data['module_moysklad_sync_warehouse_names'] = $this->normaliseStringArray($data['module_moysklad_sync_warehouse_names'] ?? []);
+
         $data['action_options'] = [
             'none' => $this->language->get('text_action_none'),
             'disable' => $this->language->get('text_action_disable'),
@@ -462,7 +586,41 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
             'new_only' => $this->language->get('text_seo_new_only')
         ];
 
+        $data['incoming_quantity_mode_options'] = [
+            'zero' => $this->language->get('text_incoming_quantity_zero'),
+            'expected' => $this->language->get('text_incoming_quantity_expected')
+        ];
+
+        $data['incoming_product_match_mode_options'] = [
+            'separate' => $this->language->get('text_incoming_match_separate'),
+            'merge_by_name' => $this->language->get('text_incoming_match_merge_by_name')
+        ];
+
+        $data['stock_status_options'] = $this->getStockStatusOptions();
+        $data['product_statuses'] = $this->getFormattedProductStatuses();
+
         return $data;
+    }
+
+
+    private function getStockStatusOptions(): array {
+        $languageId = (int)$this->config->get('config_language_id') ?: 1;
+        $result = [];
+
+        try {
+            $query = $this->db->query("SELECT `stock_status_id`, `name` FROM `" . DB_PREFIX . "stock_status`
+                WHERE `language_id` = '" . (int)$languageId . "'
+                ORDER BY `name` ASC");
+
+            foreach ($query->rows as $row) {
+                $result[(int)$row['stock_status_id']] = (string)$row['name'];
+            }
+        } catch (\Throwable $e) {
+            // На нестандартной сборке таблица может отличаться. Тогда просто
+            // оставим select пустым, а модуль использует config_stock_status_id.
+        }
+
+        return $result;
     }
 
 
@@ -497,6 +655,19 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
         $this->sendJson($json);
     }
 
+    private function getConfiguredWarehouseIds(): array {
+        $ids = $this->normaliseStringArray($this->config->get('module_moysklad_sync_warehouse_ids') ?? []);
+
+        if (!$ids) {
+            $legacyId = trim((string)$this->config->get('module_moysklad_sync_warehouse_id'));
+            if ($legacyId !== '') {
+                $ids[] = $legacyId;
+            }
+        }
+
+        return $ids;
+    }
+
     private function assertTaskCanStart(string $type): void {
         if (!(int)$this->config->get('module_moysklad_sync_status')) {
             throw new \RuntimeException($this->language->get('error_module_disabled'));
@@ -508,7 +679,7 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
 
         // Для импорта и остатков уже нужен выбранный склад: импорт тоже будет
         // обновлять остаток/статус, а значит должен знать источник остатков.
-        if (in_array($type, ['import', 'stock'], true) && !trim((string)$this->config->get('module_moysklad_sync_warehouse_id'))) {
+        if (in_array($type, ['import', 'stock'], true) && !$this->getConfiguredWarehouseIds()) {
             throw new \RuntimeException($this->language->get('error_warehouse_required'));
         }
 
@@ -536,6 +707,15 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
             $value = $this->config->get($key);
             $settings[$key] = $value !== null ? $value : $default;
         }
+
+        // Совместимость со старыми установками: раньше выбирался один склад и
+        // сохранялся в warehouse_id. Теперь храним массив warehouse_ids, но если
+        // массив еще пустой, используем старое значение как первый выбранный склад.
+        $settings['module_moysklad_sync_warehouse_ids'] = $this->normaliseStringArray($settings['module_moysklad_sync_warehouse_ids'] ?? []);
+        if (!$settings['module_moysklad_sync_warehouse_ids'] && !empty($settings['module_moysklad_sync_warehouse_id'])) {
+            $settings['module_moysklad_sync_warehouse_ids'] = [(string)$settings['module_moysklad_sync_warehouse_id']];
+        }
+        $settings['module_moysklad_sync_warehouse_names'] = $this->normaliseStringArray($settings['module_moysklad_sync_warehouse_names'] ?? []);
 
         return $settings;
     }
@@ -589,6 +769,97 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
         ];
     }
 
+    private function getFormattedProductStatuses(): array {
+        try {
+            if (!isset($this->model_extension_moysklad_sync_module_moysklad_product)) {
+                $this->loadProductModel();
+            }
+
+            return $this->formatProductStatuses($this->model_extension_moysklad_sync_module_moysklad_product->getSyncProductsForAdmin());
+        } catch (\Throwable $e) {
+            $this->log->write('Moysklad Sync product status list error: ' . $e->getMessage());
+            return [];
+        }
+    }
+
+    /**
+     * Возвращает список товаров с учетом фильтров и сортировки из вкладки «Товары».
+     *
+     * Фильтры передаются через query string AJAX-запроса, а не через основную форму
+     * настроек. Так пользователь может сортировать список, не меняя настройки модуля.
+     */
+    private function getFormattedProductStatusesFromRequest(?int $forcedLimit = null): array {
+        try {
+            if (!isset($this->model_extension_moysklad_sync_module_moysklad_product)) {
+                $this->loadProductModel();
+            }
+
+            $filter = [
+                'search' => trim((string)($this->request->get['filter_search'] ?? '')),
+                'source' => trim((string)($this->request->get['filter_source'] ?? '')),
+                'status' => trim((string)($this->request->get['filter_status'] ?? '')),
+                'quantity' => trim((string)($this->request->get['filter_quantity'] ?? '')),
+                'expected' => trim((string)($this->request->get['filter_expected'] ?? '')),
+                'order_state' => trim((string)($this->request->get['filter_order_state'] ?? '')),
+            ];
+
+            $sort = trim((string)($this->request->get['sort'] ?? 'product'));
+            $order = trim((string)($this->request->get['order'] ?? 'ASC'));
+            $limit = $forcedLimit !== null ? $forcedLimit : (int)($this->request->get['limit'] ?? 150);
+
+            return $this->formatProductStatuses(
+                $this->model_extension_moysklad_sync_module_moysklad_product->getSyncProductsForAdmin($filter, $sort, $order, $limit)
+            );
+        } catch (\Throwable $e) {
+            $this->log->write('Moysklad Sync product status filtered list error: ' . $e->getMessage());
+            return [];
+        }
+    }
+
+    private function formatProductStatuses(array $rows): array {
+        $result = [];
+
+        foreach ($rows as $row) {
+            $source = (string)($row['sync_source'] ?? 'unknown');
+            $badge = 'secondary';
+            $sourceTitle = $this->language->get('text_product_source_unknown');
+
+            if ($source === 'stock') {
+                $badge = 'success';
+                $sourceTitle = $this->language->get('text_product_source_stock');
+            } elseif ($source === 'incoming') {
+                $badge = 'warning';
+                $sourceTitle = $this->language->get('text_product_source_incoming');
+            } elseif ($source === 'stock_incoming') {
+                $badge = 'info';
+                $sourceTitle = $this->language->get('text_product_source_stock_incoming');
+            } elseif ($source === 'missing') {
+                $badge = 'danger';
+                $sourceTitle = $this->language->get('text_product_source_missing');
+            }
+
+            $result[] = [
+                'product_id' => (int)($row['product_id'] ?? 0),
+                'name' => (string)($row['name'] ?? ''),
+                'article' => (string)($row['article'] ?? ''),
+                'quantity' => $row['quantity'] === null ? '' : (string)(int)$row['quantity'],
+                'status' => (int)($row['status'] ?? 0),
+                'stock_status_name' => (string)($row['stock_status_name'] ?? ''),
+                'sync_source' => $source,
+                'sync_source_title' => $sourceTitle,
+                'sync_source_badge' => $badge,
+                'incoming_quantity' => $row['incoming_quantity'] === null ? '' : (string)(float)$row['incoming_quantity'],
+                'expected_quantity' => $row['incoming_quantity'] === null ? '' : (string)(float)$row['incoming_quantity'],
+                'purchase_order_name' => (string)($row['purchase_order_name'] ?? ''),
+                'purchase_order_state_name' => (string)($row['purchase_order_state_name'] ?? ''),
+                'last_stock_quantity' => $row['last_stock_quantity'] === null ? '' : (string)(float)$row['last_stock_quantity'],
+                'last_synced_at' => (string)($row['last_synced_at'] ?? ''),
+            ];
+        }
+
+        return $result;
+    }
+
     private function formatLogs(array $logs): array {
         $result = [];
 
@@ -634,6 +905,7 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
             'rebuild_category_tree' => $this->language->get('text_step_rebuild_category_tree'),
             'process_missing_categories' => $this->language->get('text_step_missing_categories'),
             'process_missing_products' => $this->language->get('text_step_missing_products'),
+            'sync_incoming_products' => $this->language->get('text_step_sync_incoming_products'),
             'sync_stock' => $this->language->get('text_step_sync_stock'),
             'sync_images' => $this->language->get('text_step_sync_images'),
             'finish' => $this->language->get('text_step_finish'),
@@ -649,10 +921,27 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
 
         $settings['module_moysklad_sync_status'] = !empty($post['module_moysklad_sync_status']) ? 1 : 0;
         $settings['module_moysklad_sync_api_token'] = $postedToken !== '' ? $postedToken : $existingToken;
-        $settings['module_moysklad_sync_warehouse_id'] = trim((string)($post['module_moysklad_sync_warehouse_id'] ?? ''));
-        $settings['module_moysklad_sync_warehouse_name'] = trim((string)($post['module_moysklad_sync_warehouse_name'] ?? ''));
+        // Складов может быть несколько. Для обратной совместимости сохраняем
+        // также первый выбранный склад в старые поля warehouse_id/name.
+        $settings['module_moysklad_sync_warehouse_ids'] = $this->normaliseStringArray($post['module_moysklad_sync_warehouse_ids'] ?? ($post['module_moysklad_sync_warehouse_id'] ?? []));
+        $settings['module_moysklad_sync_warehouse_names'] = $this->normaliseStringArray($post['module_moysklad_sync_warehouse_names'] ?? []);
+        $settings['module_moysklad_sync_warehouse_id'] = (string)($settings['module_moysklad_sync_warehouse_ids'][0] ?? '');
+        $settings['module_moysklad_sync_warehouse_name'] = (string)($settings['module_moysklad_sync_warehouse_names'][0] ?? trim((string)($post['module_moysklad_sync_warehouse_name'] ?? '')));
         $settings['module_moysklad_sync_price_type_id'] = trim((string)($post['module_moysklad_sync_price_type_id'] ?? ''));
         $settings['module_moysklad_sync_price_type_name'] = trim((string)($post['module_moysklad_sync_price_type_name'] ?? ''));
+        $settings['module_moysklad_sync_purchase_orders_enabled'] = !empty($post['module_moysklad_sync_purchase_orders_enabled']) ? 1 : 0;
+        $settings['module_moysklad_sync_purchase_order_state_ids'] = $this->normaliseStringArray($post['module_moysklad_sync_purchase_order_state_ids'] ?? []);
+        $settings['module_moysklad_sync_incoming_quantity_mode'] = $this->normaliseEnum(
+            $post['module_moysklad_sync_incoming_quantity_mode'] ?? 'zero',
+            ['zero', 'expected'],
+            'zero'
+        );
+        $settings['module_moysklad_sync_incoming_stock_status_id'] = max(0, (int)($post['module_moysklad_sync_incoming_stock_status_id'] ?? 0));
+        $settings['module_moysklad_sync_incoming_product_match_mode'] = $this->normaliseEnum(
+            $post['module_moysklad_sync_incoming_product_match_mode'] ?? 'separate',
+            ['separate', 'merge_by_name'],
+            'separate'
+        );
 
         $settings['module_moysklad_sync_missing_product_action'] = $this->normaliseEnum(
             $post['module_moysklad_sync_missing_product_action'] ?? 'disable',
@@ -724,6 +1013,30 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
         return !$this->error;
     }
 
+
+    private function normaliseStringArray(mixed $value): array {
+        if (is_string($value)) {
+            $decoded = json_decode($value, true);
+            $value = is_array($decoded) ? $decoded : [$value];
+        }
+
+        if (!is_array($value)) {
+            return [];
+        }
+
+        $result = [];
+
+        foreach ($value as $item) {
+            $string = trim((string)$item);
+
+            if ($string !== '') {
+                $result[$string] = $string;
+            }
+        }
+
+        return array_values($result);
+    }
+
     private function normaliseEnum(mixed $value, array $allowed, string $default): string {
         $value = (string)$value;
 
@@ -736,8 +1049,15 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
             'module_moysklad_sync_api_token' => '',
             'module_moysklad_sync_warehouse_id' => '',
             'module_moysklad_sync_warehouse_name' => '',
+            'module_moysklad_sync_warehouse_ids' => [],
+            'module_moysklad_sync_warehouse_names' => [],
             'module_moysklad_sync_price_type_id' => '',
             'module_moysklad_sync_price_type_name' => '',
+            'module_moysklad_sync_purchase_orders_enabled' => 0,
+            'module_moysklad_sync_purchase_order_state_ids' => [],
+            'module_moysklad_sync_incoming_quantity_mode' => 'zero',
+            'module_moysklad_sync_incoming_stock_status_id' => (int)$this->config->get('config_stock_status_id'),
+            'module_moysklad_sync_incoming_product_match_mode' => 'separate',
             'module_moysklad_sync_missing_product_action' => 'disable',
             'module_moysklad_sync_missing_category_action' => 'disable',
             'module_moysklad_sync_zero_stock_action' => 'disable',
@@ -788,6 +1108,7 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
         require_once $library_path . 'ProductSyncService.php';
         require_once $library_path . 'StockSyncService.php';
         require_once $library_path . 'ImageSyncService.php';
+        require_once $library_path . 'PurchaseOrderSyncService.php';
         require_once $library_path . 'TaskRunner.php';
     }
 

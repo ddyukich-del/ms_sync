@@ -46,7 +46,15 @@ class MoyskladSync extends \Opencart\System\Engine\Model {
         $this->addColumnIfMissing($table, 'moysklad_href', "`moysklad_href` VARCHAR(255) DEFAULT NULL AFTER `moysklad_id`");
         $this->addColumnIfMissing($table, 'external_code', "`external_code` VARCHAR(128) DEFAULT NULL AFTER `moysklad_href`");
         $this->addColumnIfMissing($table, 'article', "`article` VARCHAR(128) DEFAULT NULL AFTER `external_code`");
-        $this->addColumnIfMissing($table, 'last_hash', "`last_hash` CHAR(64) DEFAULT NULL AFTER `article`");
+        $this->addColumnIfMissing($table, 'name_key', "`name_key` VARCHAR(191) DEFAULT NULL AFTER `article`");
+        $this->addColumnIfMissing($table, 'sync_source', "`sync_source` VARCHAR(32) NOT NULL DEFAULT 'unknown' AFTER `name_key`");
+        $this->addColumnIfMissing($table, 'incoming_quantity', "`incoming_quantity` DECIMAL(15,4) DEFAULT NULL AFTER `sync_source`");
+        $this->addColumnIfMissing($table, 'purchase_order_id', "`purchase_order_id` VARCHAR(64) DEFAULT NULL AFTER `incoming_quantity`");
+        $this->addColumnIfMissing($table, 'purchase_order_name', "`purchase_order_name` VARCHAR(128) DEFAULT NULL AFTER `purchase_order_id`");
+        $this->addColumnIfMissing($table, 'purchase_order_state_id', "`purchase_order_state_id` VARCHAR(128) DEFAULT NULL AFTER `purchase_order_name`");
+        $this->addColumnIfMissing($table, 'purchase_order_state_name', "`purchase_order_state_name` VARCHAR(128) DEFAULT NULL AFTER `purchase_order_state_id`");
+        $this->addColumnIfMissing($table, 'last_stock_quantity', "`last_stock_quantity` DECIMAL(15,4) DEFAULT NULL AFTER `purchase_order_state_name`");
+        $this->addColumnIfMissing($table, 'last_hash', "`last_hash` CHAR(64) DEFAULT NULL AFTER `last_stock_quantity`");
         $this->addColumnIfMissing($table, 'last_seen_task_id', "`last_seen_task_id` INT UNSIGNED DEFAULT NULL AFTER `last_hash`");
         $this->addColumnIfMissing($table, 'last_seen_at', "`last_seen_at` DATETIME DEFAULT NULL AFTER `last_seen_task_id`");
         $this->addColumnIfMissing($table, 'last_synced_at', "`last_synced_at` DATETIME DEFAULT NULL AFTER `last_seen_at`");
@@ -57,6 +65,9 @@ class MoyskladSync extends \Opencart\System\Engine\Model {
         $this->addIndexIfMissing($table, 'idx_last_seen_at', "KEY `idx_last_seen_at` (`last_seen_at`)");
         $this->addIndexIfMissing($table, 'idx_article', "KEY `idx_article` (`article`)");
         $this->addIndexIfMissing($table, 'idx_external_code', "KEY `idx_external_code` (`external_code`)");
+        $this->addIndexIfMissing($table, 'idx_name_key', "KEY `idx_name_key` (`name_key`)");
+        $this->addIndexIfMissing($table, 'idx_sync_source', "KEY `idx_sync_source` (`sync_source`)");
+        $this->addIndexIfMissing($table, 'idx_purchase_order_state', "KEY `idx_purchase_order_state` (`purchase_order_state_id`)");
     }
 
     private function migrateCategoryLinkTable(): void {
@@ -170,6 +181,14 @@ class MoyskladSync extends \Opencart\System\Engine\Model {
             `moysklad_href` VARCHAR(255) DEFAULT NULL,
             `external_code` VARCHAR(128) DEFAULT NULL,
             `article` VARCHAR(128) DEFAULT NULL,
+            `name_key` VARCHAR(191) DEFAULT NULL,
+            `sync_source` VARCHAR(32) NOT NULL DEFAULT 'unknown',
+            `incoming_quantity` DECIMAL(15,4) DEFAULT NULL,
+            `purchase_order_id` VARCHAR(64) DEFAULT NULL,
+            `purchase_order_name` VARCHAR(128) DEFAULT NULL,
+            `purchase_order_state_id` VARCHAR(128) DEFAULT NULL,
+            `purchase_order_state_name` VARCHAR(128) DEFAULT NULL,
+            `last_stock_quantity` DECIMAL(15,4) DEFAULT NULL,
             `last_hash` CHAR(64) DEFAULT NULL,
             `last_seen_task_id` INT UNSIGNED DEFAULT NULL,
             `last_seen_at` DATETIME DEFAULT NULL,
@@ -181,6 +200,9 @@ class MoyskladSync extends \Opencart\System\Engine\Model {
             UNIQUE KEY `uq_product_id` (`product_id`),
             KEY `idx_article` (`article`),
             KEY `idx_external_code` (`external_code`),
+            KEY `idx_name_key` (`name_key`),
+            KEY `idx_sync_source` (`sync_source`),
+            KEY `idx_purchase_order_state` (`purchase_order_state_id`),
             KEY `idx_last_seen_task` (`last_seen_task_id`),
             KEY `idx_last_seen_at` (`last_seen_at`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
