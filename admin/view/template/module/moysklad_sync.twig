@@ -42,6 +42,7 @@
           <li class="nav-item" role="presentation"><button class="nav-link" id="tab-sync" data-bs-toggle="tab" data-bs-target="#pane-sync" type="button" role="tab">{{ text_tab_sync }}</button></li>
           <li class="nav-item" role="presentation"><button class="nav-link" id="tab-products" data-bs-toggle="tab" data-bs-target="#pane-products" type="button" role="tab">{{ text_tab_products }}</button></li>
           <li class="nav-item" role="presentation"><button class="nav-link" id="tab-logs" data-bs-toggle="tab" data-bs-target="#pane-logs" type="button" role="tab">{{ text_tab_logs }}</button></li>
+          <li class="nav-item" role="presentation"><button class="nav-link" id="tab-diagnostics" data-bs-toggle="tab" data-bs-target="#pane-diagnostics" type="button" role="tab">{{ text_tab_diagnostics }}</button></li>
         </ul>
 
         <div class="tab-content pt-3">
@@ -126,9 +127,21 @@
                 </div>
 
                 <div class="row mb-3">
+                  <label class="col-sm-3 col-form-label" for="input-include-incoming-site-quantity">{{ entry_include_incoming_in_site_quantity }}</label>
+                  <div class="col-sm-9">
+                    <div class="form-check form-switch form-switch-lg">
+                      <input type="hidden" name="module_moysklad_sync_include_incoming_in_site_quantity" value="0"/>
+                      <input type="checkbox" name="module_moysklad_sync_include_incoming_in_site_quantity" value="1" id="input-include-incoming-site-quantity" class="form-check-input"{% if module_moysklad_sync_include_incoming_in_site_quantity %} checked{% endif %}/>
+                    </div>
+                    <div class="form-text">{{ help_include_incoming_in_site_quantity }}</div>
+                  </div>
+                </div>
+
+                <div class="row mb-3">
                   <label class="col-sm-3 col-form-label" for="input-incoming-quantity-mode">{{ entry_incoming_quantity_mode }}</label>
                   <div class="col-sm-9">
-                    <select name="module_moysklad_sync_incoming_quantity_mode" id="input-incoming-quantity-mode" class="form-select">
+                    <input type="hidden" name="module_moysklad_sync_incoming_quantity_mode" value="zero"/>
+                    <select id="input-incoming-quantity-mode" class="form-select" disabled>
                       {% for value, title in incoming_quantity_mode_options %}
                         <option value="{{ value }}"{% if value == module_moysklad_sync_incoming_quantity_mode %} selected{% endif %}>{{ title }}</option>
                       {% endfor %}
@@ -140,7 +153,8 @@
                 <div class="row mb-3">
                   <label class="col-sm-3 col-form-label" for="input-incoming-product-match-mode">{{ entry_incoming_product_match_mode }}</label>
                   <div class="col-sm-9">
-                    <select name="module_moysklad_sync_incoming_product_match_mode" id="input-incoming-product-match-mode" class="form-select">
+                    <input type="hidden" name="module_moysklad_sync_incoming_product_match_mode" value="by_moysklad_id"/>
+                    <select id="input-incoming-product-match-mode" class="form-select" disabled>
                       {% for value, title in incoming_product_match_mode_options %}
                         <option value="{{ value }}"{% if value == module_moysklad_sync_incoming_product_match_mode %} selected{% endif %}>{{ title }}</option>
                       {% endfor %}
@@ -272,6 +286,17 @@
                     </select>
                   </div>
                 </div>
+
+                <div class="row mb-3">
+                  <label class="col-sm-3 col-form-label" for="input-api-debug">{{ entry_api_debug_enabled }}</label>
+                  <div class="col-sm-9">
+                    <div class="form-check form-switch form-switch-lg">
+                      <input type="hidden" name="module_moysklad_sync_api_debug_enabled" value="0"/>
+                      <input type="checkbox" name="module_moysklad_sync_api_debug_enabled" value="1" id="input-api-debug" class="form-check-input"{% if module_moysklad_sync_api_debug_enabled %} checked{% endif %}/>
+                    </div>
+                    <div class="form-text">{{ help_api_debug_enabled }}</div>
+                  </div>
+                </div>
               </fieldset>
             </form>
           </div>
@@ -371,6 +396,7 @@
                       <option value="article">{{ text_sort_by_article }}</option>
                       <option value="source">{{ text_sort_by_source }}</option>
                       <option value="quantity">{{ text_sort_by_quantity }}</option>
+                      <option value="site_quantity">{{ text_sort_by_site_quantity }}</option>
                       <option value="expected">{{ text_sort_by_expected }}</option>
                       <option value="stock_status">{{ text_sort_by_stock_status }}</option>
                       <option value="purchase_order">{{ text_sort_by_purchase_order }}</option>
@@ -402,6 +428,22 @@
             <h3>{{ text_logs_latest }}</h3>
             <div id="logs-panel" class="table-responsive">
               <div class="alert alert-secondary">{{ text_no_logs }}</div>
+            </div>
+          </div>
+
+
+          <div class="tab-pane fade" id="pane-diagnostics" role="tabpanel">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+              <h3 class="mb-0">{{ text_diagnostics_title }}</h3>
+              <div class="d-flex flex-wrap gap-2">
+                <button type="button" class="btn btn-primary btn-sm" id="button-refresh-diagnostics"><i class="fa-solid fa-stethoscope"></i> {{ button_refresh_diagnostics }}</button>
+                <a class="btn btn-success btn-sm" id="button-download-api-debug" href="{{ download_api_debug_log }}"><i class="fa-solid fa-download"></i> {{ button_download_api_debug_log }}</a>
+                <button type="button" class="btn btn-outline-danger btn-sm" id="button-clear-api-debug"><i class="fa-solid fa-trash"></i> {{ button_clear_api_debug_log }}</button>
+              </div>
+            </div>
+            <div class="alert alert-info"><i class="fa-solid fa-circle-info"></i> {{ text_diagnostics_help }}</div>
+            <div id="diagnostics-panel">
+              <div class="alert alert-secondary">{{ text_diagnostics_empty }}</div>
             </div>
           </div>
         </div>
@@ -444,6 +486,9 @@
   const productOrder = document.getElementById('product-order');
   const applyProductFilterButton = document.getElementById('button-apply-product-filter');
   const resetProductFilterButton = document.getElementById('button-reset-product-filter');
+  const refreshDiagnosticsButton = document.getElementById('button-refresh-diagnostics');
+  const clearApiDebugButton = document.getElementById('button-clear-api-debug');
+  const diagnosticsPanel = document.getElementById('diagnostics-panel');
   let taskLoopRunning = false;
 
   // Важно: AJAX-URL собираем на стороне браузера из текущего URL страницы.
@@ -855,6 +900,7 @@
       + '<th>' + sortButton('source', '{{ column_sync_source|e('js') }}') + '</th>'
       + '<th>' + sortButton('quantity', '{{ column_quantity|e('js') }}') + '</th>'
       + '<th>' + sortButton('expected', '{{ column_expected_quantity|e('js') }}') + '</th>'
+      + '<th>' + sortButton('site_quantity', '{{ column_site_quantity|e('js') }}') + '</th>'
       + '<th>' + sortButton('stock_status', '{{ column_stock_status|e('js') }}') + '</th>'
       + '<th>' + sortButton('purchase_order', '{{ column_purchase_order|e('js') }}') + '</th>'
       + '<th>' + sortButton('updated', '{{ column_updated|e('js') }}') + '</th>'
@@ -873,6 +919,7 @@
         + '<td><span class="badge text-bg-' + escapeHtml(row.sync_source_badge || 'secondary') + '">' + escapeHtml(row.sync_source_title || '') + '</span></td>'
         + '<td class="moysklad-number">' + escapeHtml(row.quantity || '0') + '</td>'
         + '<td class="moysklad-number">' + escapeHtml(expectedQuantity) + '</td>'
+        + '<td class="moysklad-number fw-bold">' + escapeHtml(row.site_quantity || '0') + '</td>'
         + '<td>' + escapeHtml(row.stock_status_name || '') + '</td>'
         + '<td>' + orderInfo + '</td>'
         + '<td>' + escapeHtml(row.last_synced_at || '') + '</td>'
@@ -912,6 +959,126 @@
         refreshProductStatuses();
       });
     });
+  }
+
+
+  async function refreshDiagnostics() {
+    setLoading(refreshDiagnosticsButton, true);
+
+    try {
+      const json = await post(ajaxUrl('get_diagnostics'));
+
+      if (json.error) {
+        showAlert('danger', json.error);
+        return;
+      }
+
+      renderDiagnostics(json.diagnostics || {});
+    } catch (error) {
+      showAlert('danger', error.message);
+    } finally {
+      setLoading(refreshDiagnosticsButton, false);
+    }
+  }
+
+  async function clearApiDebugLog() {
+    setLoading(clearApiDebugButton, true);
+
+    try {
+      const json = await post(ajaxUrl('clear_api_debug_log'));
+
+      if (json.error) {
+        showAlert('danger', json.error);
+        return;
+      }
+
+      showAlert('success', json.success || '{{ text_success|e('js') }}');
+      renderDiagnostics(json.diagnostics || {});
+    } catch (error) {
+      showAlert('danger', error.message);
+    } finally {
+      setLoading(clearApiDebugButton, false);
+    }
+  }
+
+  function renderDiagnostics(data) {
+    if (!diagnosticsPanel) {
+      return;
+    }
+
+    const yesNo = function (value) {
+      return value ? '<span class="badge text-bg-success">{{ text_yes|e('js') }}</span>' : '<span class="badge text-bg-danger">{{ text_no|e('js') }}</span>';
+    };
+
+    const infoBadge = function (value) {
+      return '<span class="badge text-bg-secondary">' + escapeHtml(value) + '</span>';
+    };
+
+    const latestTask = data.latest_task || {};
+    const latestLog = data.latest_log || {};
+
+    let html = '<div class="row g-3">';
+    html += diagnosticCard('{{ text_diag_core|e('js') }}', [
+      ['{{ text_diag_version|e('js') }}', escapeHtml(data.version || '')],
+      ['{{ text_diag_module_enabled|e('js') }}', yesNo(data.module_enabled)],
+      ['{{ text_diag_api_token|e('js') }}', yesNo(data.api_token_set)],
+      ['{{ text_diag_price_type|e('js') }}', yesNo(data.price_type_set)],
+      ['{{ text_diag_warehouses|e('js') }}', infoBadge(data.warehouses_count || 0)],
+      ['{{ text_diag_purchase_states|e('js') }}', infoBadge(data.purchase_order_states_count || 0)]
+    ]);
+    html += diagnosticCard('{{ text_diag_dashboard|e('js') }}', [
+      ['{{ text_diag_dashboard_extension|e('js') }}', yesNo(data.dashboard_extension)],
+      ['{{ text_diag_dashboard_status|e('js') }}', yesNo(Number(data.dashboard_status || 0) === 1)],
+      ['{{ text_diag_dashboard_width|e('js') }}', infoBadge(data.dashboard_width || 0)],
+      ['{{ text_diag_dashboard_sort|e('js') }}', infoBadge(data.dashboard_sort_order || 0)],
+      ['{{ text_diag_dashboard_access|e('js') }}', yesNo(data.permission_dashboard_access)]
+    ]);
+    html += diagnosticCard('{{ text_diag_permissions|e('js') }}', [
+      ['{{ text_diag_user_group|e('js') }}', infoBadge(data.current_user_group_id || 0)],
+      ['{{ text_diag_module_access|e('js') }}', yesNo(data.permission_module_access)],
+      ['{{ text_diag_module_modify|e('js') }}', yesNo(data.permission_module_modify)]
+    ]);
+    html += diagnosticCard('{{ text_diag_server|e('js') }}', [
+      ['cURL', yesNo(data.curl_available)],
+      ['JSON', yesNo(data.json_available)],
+      ['{{ text_diag_image_writable|e('js') }}', yesNo(data.image_dir_writable)],
+      ['{{ text_diag_logs_writable|e('js') }}', yesNo(data.storage_logs_writable)],
+      ['{{ text_diag_extension_dir|e('js') }}', yesNo(data.extension_dir_found)]
+    ]);
+    html += diagnosticCard('{{ text_diag_api_log|e('js') }}', [
+      ['{{ text_diag_api_debug_enabled|e('js') }}', yesNo(data.api_debug_enabled)],
+      ['{{ text_diag_api_log_exists|e('js') }}', yesNo(data.api_debug_log_exists)],
+      ['{{ text_diag_api_log_size|e('js') }}', infoBadge(formatBytes(data.api_debug_log_size || 0))]
+    ]);
+    html += diagnosticCard('{{ text_diag_last_task|e('js') }}', [
+      ['ID', latestTask.task_id ? '#' + escapeHtml(latestTask.task_id) : '—'],
+      ['{{ text_diag_task_type|e('js') }}', escapeHtml(latestTask.task_type_title || '—')],
+      ['{{ text_diag_task_status|e('js') }}', escapeHtml(latestTask.status_title || '—')],
+      ['{{ text_diag_task_errors|e('js') }}', infoBadge(latestTask.error_items || 0)],
+      ['{{ text_diag_last_error|e('js') }}', escapeHtml(latestTask.last_error || (latestLog.message || '—'))]
+    ]);
+    html += '</div>';
+    diagnosticsPanel.innerHTML = html;
+  }
+
+  function diagnosticCard(title, rows) {
+    let html = '<div class="col-lg-6"><div class="card h-100"><div class="card-header fw-bold">' + escapeHtml(title) + '</div><div class="card-body p-0"><table class="table table-sm mb-0"><tbody>';
+    rows.forEach(function (row) {
+      html += '<tr><td class="text-muted" style="width:45%">' + escapeHtml(row[0]) + '</td><td>' + row[1] + '</td></tr>';
+    });
+    html += '</tbody></table></div></div></div>';
+    return html;
+  }
+
+  function formatBytes(bytes) {
+    bytes = Number(bytes || 0);
+    if (bytes < 1024) {
+      return bytes + ' B';
+    }
+    if (bytes < 1024 * 1024) {
+      return Math.round(bytes / 1024) + ' KB';
+    }
+    return (bytes / 1024 / 1024).toFixed(1) + ' MB';
   }
 
   function renderLogs(logs) {
@@ -954,6 +1121,12 @@
   startImagesButton.addEventListener('click', function () { startTask(ajaxUrl('start_image_sync'), startImagesButton); });
   stopTaskButton.addEventListener('click', stopTask);
   refreshStatusButton.addEventListener('click', refreshStatus);
+  if (refreshDiagnosticsButton) {
+    refreshDiagnosticsButton.addEventListener('click', refreshDiagnostics);
+  }
+  if (clearApiDebugButton) {
+    clearApiDebugButton.addEventListener('click', clearApiDebugLog);
+  }
   if (refreshProductsButton) {
     refreshProductsButton.addEventListener('click', refreshProductStatuses);
   }
@@ -1013,8 +1186,37 @@
     });
   });
 
+  // Если пользователь пришел из меню/виджета с параметром tab=products,
+  // сразу открываем вкладку «Товары». Это удобнее для менеджеров: ссылка ведет
+  // не просто в настройки модуля, а в рабочий список товаров.
+  const initialTab = new URL(window.location.href).searchParams.get('tab');
+  if (initialTab === 'products') {
+    const productsTab = document.getElementById('tab-products');
+    if (productsTab && typeof bootstrap !== 'undefined') {
+      bootstrap.Tab.getOrCreateInstance(productsTab).show();
+    }
+  } else if (initialTab === 'sync') {
+    const syncTab = document.getElementById('tab-sync');
+    if (syncTab && typeof bootstrap !== 'undefined') {
+      bootstrap.Tab.getOrCreateInstance(syncTab).show();
+    }
+  } else if (initialTab === 'diagnostics') {
+    const diagnosticsTab = document.getElementById('tab-diagnostics');
+    if (diagnosticsTab && typeof bootstrap !== 'undefined') {
+      bootstrap.Tab.getOrCreateInstance(diagnosticsTab).show();
+    }
+  }
+
+  const diagnosticsTabButton = document.getElementById('tab-diagnostics');
+  if (diagnosticsTabButton) {
+    diagnosticsTabButton.addEventListener('shown.bs.tab', refreshDiagnostics);
+  }
+
   updateWarehouseNamesHidden();
   refreshStatus();
+  if (initialTab === 'diagnostics') {
+    refreshDiagnostics();
+  }
 })();
 </script>
 {{ footer }}

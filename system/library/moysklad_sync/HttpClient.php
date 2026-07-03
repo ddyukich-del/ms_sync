@@ -14,19 +14,22 @@ class HttpClient {
     private int $timeout;
     private int $connectTimeout;
     private int $maxRetries;
+    private bool $debugEnabled;
 
     public function __construct(
         string $token,
         string $baseUrl = 'https://api.moysklad.ru/api/remap/1.2',
         int $timeout = 20,
         int $connectTimeout = 5,
-        int $maxRetries = 2
+        int $maxRetries = 2,
+        bool $debugEnabled = false
     ) {
         $this->token = trim($token);
         $this->baseUrl = rtrim($baseUrl, '/');
         $this->timeout = $timeout;
         $this->connectTimeout = $connectTimeout;
         $this->maxRetries = max(0, $maxRetries);
+        $this->debugEnabled = $debugEnabled;
     }
 
     /**
@@ -99,7 +102,7 @@ class HttpClient {
         $headers = [
             'Accept: image/*,*/*;q=0.8',
             'Authorization: Bearer ' . $this->token,
-            'User-Agent: ocstore-moysklad-sync/0.7.0'
+            'User-Agent: ocstore-moysklad-sync/1.0.2'
         ];
 
         curl_setopt_array($ch, [
@@ -182,7 +185,7 @@ class HttpClient {
             'Accept: application/json;charset=utf-8',
             'Content-Type: application/json;charset=utf-8',
             'Authorization: Bearer ' . $this->token,
-            'User-Agent: ocstore-moysklad-sync/0.7.0'
+            'User-Agent: ocstore-moysklad-sync/1.0.2'
         ];
 
         $ch = curl_init($url);

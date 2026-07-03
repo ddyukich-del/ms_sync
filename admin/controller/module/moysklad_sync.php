@@ -13,6 +13,7 @@ use MoyskladSync\TaskRunner;
 
 class MoyskladSync extends \Opencart\System\Engine\Controller {
     private const SETTING_CODE = 'module_moysklad_sync';
+    private const VERSION = '1.0.2';
 
     private array $error = [];
 
@@ -30,6 +31,12 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
         // делаем, чтобы не добавлять лишние SHOW/ALTER-запросы во время импорта.
         if ($ajax_action === '') {
             $this->ensureModuleSchemaOnPageLoad();
+
+            // При обновлении архива поверх рабочей версии метод install() может не
+            // вызываться повторно. Поэтому при открытии страницы модуля мягко
+            // убеждаемся, что права на основной маршрут и dashboard-виджет есть
+            // у текущей группы администратора.
+            $this->grantCurrentAdminPermissions();
         }
 
         if ($ajax_action !== '') {
@@ -88,6 +95,15 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
                 break;
             case 'export_product_statuses':
                 $this->exportProductStatuses();
+                break;
+            case 'get_diagnostics':
+                $this->getDiagnostics();
+                break;
+            case 'clear_api_debug_log':
+                $this->clearApiDebugLog();
+                break;
+            case 'download_api_debug_log':
+                $this->downloadApiDebugLog();
                 break;
             case 'stop_task':
                 $this->stopTask();
@@ -403,6 +419,7 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
             $this->language->get('column_sync_source'),
             $this->language->get('column_quantity'),
             $this->language->get('column_expected_quantity'),
+            $this->language->get('column_site_quantity'),
             $this->language->get('column_stock_status'),
             $this->language->get('column_purchase_order'),
             $this->language->get('column_purchase_order_state'),
@@ -417,6 +434,7 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
                 (string)($row['sync_source_title'] ?? ''),
                 (string)($row['quantity'] ?? ''),
                 (string)($row['expected_quantity'] ?? $row['incoming_quantity'] ?? ''),
+                (string)($row['site_quantity'] ?? ''),
                 (string)($row['stock_status_name'] ?? ''),
                 (string)($row['purchase_order_name'] ?? ''),
                 (string)($row['purchase_order_state_name'] ?? ''),
@@ -435,6 +453,70 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
         $this->response->addHeader('Pragma: no-cache');
         $this->response->addHeader('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
         $this->response->setOutput($csv ?: '');
+    }
+
+
+    /** AJAX: собирает диагностический отчет перед релизом/поддержкой. */
+    public function getDiagnostics(): void {
+        $this->load->language('extension/moysklad_sync/module/moysklad_sync');
+
+        if (!$this->user->hasPermission('access', 'extension/moysklad_sync/module/moysklad_sync')) {
+            $this->sendJson(['error' => $this->language->get('error_permission')]);
+            return;
+        }
+
+        $diagnostics = $this->buildDiagnostics();
+        $this->sendJson(['diagnostics' => $diagnostics]);
+    }
+
+    /** AJAX: очищает сырой API debug log. */
+    public function clearApiDebugLog(): void {
+        $this->load->language('extension/moysklad_sync/module/moysklad_sync');
+
+        if (!$this->user->hasPermission('modify', 'extension/moysklad_sync/module/moysklad_sync')) {
+            $this->sendJson(['error' => $this->language->get('error_permission')]);
+            return;
+        }
+
+        $files = [$this->getApiDebugLogPath(), $this->getApiDebugLogPath() . '.old'];
+        $deleted = 0;
+
+        foreach ($files as $file) {
+            if (is_file($file) && @unlink($file)) {
+                $deleted++;
+            }
+        }
+
+        $this->sendJson([
+            'success' => $deleted > 0 ? $this->language->get('text_api_debug_log_cleared') : $this->language->get('text_api_debug_log_already_empty'),
+            'diagnostics' => $this->buildDiagnostics()
+        ]);
+    }
+
+    /** GET: скачивает сырой API debug log без токена авторизации. */
+    public function downloadApiDebugLog(): void {
+        $this->load->language('extension/moysklad_sync/module/moysklad_sync');
+
+        if (!$this->user->hasPermission('access', 'extension/moysklad_sync/module/moysklad_sync')) {
+            $this->response->addHeader('Content-Type: text/plain; charset=UTF-8');
+            $this->response->setOutput($this->language->get('error_permission'));
+            return;
+        }
+
+        $file = $this->getApiDebugLogPath();
+
+        if (!is_file($file) || !is_readable($file)) {
+            $this->response->addHeader('Content-Type: text/plain; charset=UTF-8');
+            $this->response->setOutput($this->language->get('text_api_debug_log_missing'));
+            return;
+        }
+
+        $filename = 'moysklad_api_debug_' . date('Y-m-d_H-i-s') . '.log';
+        $this->response->addHeader('Content-Type: text/plain; charset=UTF-8');
+        $this->response->addHeader('Content-Disposition: attachment; filename="' . $filename . '"');
+        $this->response->addHeader('Pragma: no-cache');
+        $this->response->addHeader('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+        $this->response->setOutput((string)file_get_contents($file));
     }
 
     /** AJAX: останавливает активную задачу. */
@@ -476,6 +558,10 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
         try {
             $this->load->model('extension/moysklad_sync/module/moysklad_sync');
             $this->model_extension_moysklad_sync_module_moysklad_sync->ensureSchema();
+            $this->cleanupBrokenShortcutModification();
+            // Если архив обновили поверх предыдущей версии, install() мог не вызваться.
+            // Поэтому мягко регистрируем dashboard-виджет при открытии страницы.
+            $this->installDashboardWidget();
         } catch (\Throwable $e) {
             $this->log->write('Moysklad Sync schema migration error: ' . $e->getMessage());
         }
@@ -484,6 +570,7 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
     public function install(): void {
         $this->load->model('extension/moysklad_sync/module/moysklad_sync');
         $this->model_extension_moysklad_sync_module_moysklad_sync->install();
+        $this->cleanupBrokenShortcutModification();
 
         $this->load->model('setting/setting');
         $this->model_setting_setting->editSetting(self::SETTING_CODE, $this->getDefaultSettings());
@@ -492,14 +579,45 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
         // Пользователь все равно может вручную проверить права в User Groups,
         // но после установки модуль не должен ломать AJAX из-за отсутствия access/modify.
         $this->grantCurrentAdminPermissions();
+
+        // Регистрируем штатный dashboard-виджет OpenCart. Это безопаснее, чем
+        // вмешиваться в левое меню через OCMOD: главная админки сама загружает
+        // расширения типа dashboard через таблицу extension и настройки dashboard_*.
+        $this->installDashboardWidget(true);
     }
 
     public function uninstall(): void {
         $this->load->model('extension/moysklad_sync/module/moysklad_sync');
         $this->model_extension_moysklad_sync_module_moysklad_sync->uninstall();
+        $this->cleanupBrokenShortcutModification();
+        $this->uninstallDashboardWidget();
+
+        // Устаревшие быстрые ссылки/OCMOD чистим вручную: в некоторых сборках ocStore
+        // неудачная модификация может мешать штатному удалению/установке.
+        // Служебные таблицы модуля не удаляем: они содержат связи товаров/категорий.
 
         $this->load->model('setting/setting');
         $this->model_setting_setting->deleteSetting(self::SETTING_CODE);
+    }
+
+
+    /**
+     * Удаляет старую экспериментальную OCMOD-модификацию быстрых ссылок.
+     *
+     * В версиях 0.11.1–0.11.3 мы пробовали добавлять пункт меню и виджет через OCMOD.
+     * На некоторых сборках ocStore это не применялось, а иногда мешало штатной установке
+     * и удалению. Поэтому с 0.11.4 модуль возвращен в безопасный режим: без правки
+     * меню/главной страницы. Старую запись модификатора удаляем мягко, если таблица есть.
+     */
+    private function cleanupBrokenShortcutModification(): void {
+        try {
+            $this->db->query("DELETE FROM `" . DB_PREFIX . "modification` WHERE `code` = 'moysklad_sync_admin_shortcuts' OR `name` LIKE '%Moysklad Sync Admin Shortcuts%' OR `xml` LIKE '%moysklad_sync_admin_shortcuts%'");
+            $this->db->query("DELETE FROM `" . DB_PREFIX . "event` WHERE `code` = 'moysklad_sync_admin_menu' OR `action` LIKE '%moysklad_sync|addAdminMenu%'");
+        } catch (\Throwable $e) {
+            // Не прерываем установку/открытие страницы: в разных сборках таблица
+            // modification может называться или вести себя иначе.
+            $this->log->write('Moysklad Sync shortcut modification cleanup error: ' . $e->getMessage());
+        }
     }
 
     private function grantCurrentAdminPermissions(): void {
@@ -508,16 +626,216 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
                 return;
             }
 
-            $this->load->model('user/user_group');
-            $user_group_id = (int)$this->user->getGroupId();
-            $route = 'extension/moysklad_sync/module/moysklad_sync';
-
-            $this->model_user_user_group->addPermission($user_group_id, 'access', $route);
-            $this->model_user_user_group->addPermission($user_group_id, 'modify', $route);
+            $this->grantDashboardPermissions();
         } catch (\Throwable $e) {
             // Не прерываем установку, если конкретная сборка ocStore отличается
             // моделью прав. В этом случае права можно выдать вручную.
         }
+    }
+
+    /**
+     * Регистрирует быстрый пункт «МойСклад» в левом меню админки.
+     *
+     * Используем Event, а не правку файлов ядра. Это работает и при переименованной
+     * папке admin в maestro: ссылка строится через текущий admin URL и user_token.
+     */
+    private function registerAdminShortcuts(): void {
+        try {
+            $this->load->model('setting/event');
+            $this->model_setting_event->deleteEventByCode('moysklad_sync_admin_menu');
+            $this->model_setting_event->addEvent([
+                'code' => 'moysklad_sync_admin_menu',
+                'description' => 'Moysklad Sync admin menu shortcut',
+                'trigger' => 'admin/view/common/column_left/before',
+                'action' => 'extension/moysklad_sync/module/moysklad_sync|addAdminMenu',
+                'status' => true,
+                'sort_order' => 10
+            ]);
+        } catch (\Throwable $e) {
+            $this->log->write('Moysklad Sync menu event install error: ' . $e->getMessage());
+        }
+    }
+
+    private function unregisterAdminShortcuts(): void {
+        try {
+            $this->load->model('setting/event');
+            $this->model_setting_event->deleteEventByCode('moysklad_sync_admin_menu');
+        } catch (\Throwable $e) {
+            // Не мешаем uninstall, если таблица event или модель отличается.
+        }
+    }
+
+    /**
+     * Регистрирует виджет на главной странице админки штатным механизмом dashboard.
+     *
+     * OpenCart/ocStore 4 выводит dashboard-блоки из таблицы extension с type=dashboard
+     * и проверяет настройки dashboard_{code}_status/width/sort_order. Повторный вызов
+     * безопасен: model_setting_extension->install() не создает дубликаты по code.
+     */
+    private function installDashboardWidget(bool $forceDefaults = false): void {
+        try {
+            $this->load->model('setting/extension');
+            $this->model_setting_extension->install('dashboard', 'moysklad_sync', 'moysklad_sync');
+
+            // Важно: в OpenCart 4 config->get() возвращает пустую строку для
+            // отсутствующей настройки, а не null. Поэтому настройки dashboard
+            // проверяем напрямую в oc_setting и добавляем недостающие ключи точечно.
+            // Если настройка уже есть, не перетираем ее без forceDefaults.
+            $this->ensureDashboardSettings($forceDefaults);
+            $this->grantDashboardPermissions();
+        } catch (\Throwable $e) {
+            // Не блокируем установку модуля: если конкретная сборка ocStore отличается
+            // таблицами dashboard/extension, основная синхронизация должна остаться рабочей.
+            $this->log->write('Moysklad Sync dashboard install error: ' . $e->getMessage());
+        }
+    }
+
+    /** Гарантирует наличие настроек штатного dashboard-виджета. */
+    private function ensureDashboardSettings(bool $forceDefaults = false): void {
+        $defaults = [
+            'dashboard_moysklad_sync_status' => 1,
+            'dashboard_moysklad_sync_width' => 12,
+            'dashboard_moysklad_sync_sort_order' => 1
+        ];
+
+        foreach ($defaults as $key => $value) {
+            $query = $this->db->query("SELECT `setting_id` FROM `" . DB_PREFIX . "setting` WHERE `store_id` = '0' AND `key` = '" . $this->db->escape($key) . "' LIMIT 1");
+
+            if ($query->num_rows && !$forceDefaults) {
+                continue;
+            }
+
+            if ($query->num_rows) {
+                $this->db->query("UPDATE `" . DB_PREFIX . "setting` SET `code` = 'dashboard_moysklad_sync', `value` = '" . $this->db->escape((string)$value) . "', `serialized` = '0' WHERE `setting_id` = '" . (int)$query->row['setting_id'] . "'");
+            } else {
+                $this->db->query("INSERT INTO `" . DB_PREFIX . "setting` SET `store_id` = '0', `code` = 'dashboard_moysklad_sync', `key` = '" . $this->db->escape($key) . "', `value` = '" . $this->db->escape((string)$value) . "', `serialized` = '0'");
+            }
+        }
+    }
+
+    /**
+     * Выдает права на основной модуль и dashboard-виджет.
+     *
+     * common/dashboard молча пропускает виджет, если у текущей группы нет access
+     * на route extension/moysklad_sync/dashboard/moysklad_sync. Поэтому права
+     * добавляем напрямую и без дублей. Дополнительно выдаем dashboard тем группам,
+     * у которых уже есть доступ к основному модулю.
+     */
+    private function grantDashboardPermissions(): void {
+        $routes = [
+            'extension/moysklad_sync/module/moysklad_sync',
+            'extension/moysklad_sync/dashboard/moysklad_sync'
+        ];
+
+        $groupIds = [];
+
+        if (isset($this->user) && method_exists($this->user, 'getGroupId')) {
+            $groupIds[] = (int)$this->user->getGroupId();
+        }
+
+        try {
+            $query = $this->db->query("SELECT `user_group_id`, `permission` FROM `" . DB_PREFIX . "user_group` WHERE `permission` LIKE '%moysklad_sync%'");
+            foreach ($query->rows as $row) {
+                $groupIds[] = (int)$row['user_group_id'];
+            }
+        } catch (\Throwable $e) {
+            // Если таблица прав отличается, оставим хотя бы текущую группу.
+        }
+
+        $groupIds = array_values(array_unique(array_filter($groupIds)));
+
+        foreach ($groupIds as $userGroupId) {
+            foreach (['access', 'modify'] as $type) {
+                foreach ($routes as $route) {
+                    $this->ensureUserGroupPermission($userGroupId, $type, $route);
+                }
+            }
+        }
+    }
+
+    private function ensureUserGroupPermission(int $userGroupId, string $type, string $route): void {
+        $query = $this->db->query("SELECT `permission` FROM `" . DB_PREFIX . "user_group` WHERE `user_group_id` = '" . (int)$userGroupId . "' LIMIT 1");
+
+        if (!$query->num_rows) {
+            return;
+        }
+
+        $permissions = json_decode((string)$query->row['permission'], true);
+
+        if (!is_array($permissions)) {
+            $permissions = [];
+        }
+
+        if (!isset($permissions[$type]) || !is_array($permissions[$type])) {
+            $permissions[$type] = [];
+        }
+
+        if (!in_array($route, $permissions[$type], true)) {
+            $permissions[$type][] = $route;
+            $this->db->query("UPDATE `" . DB_PREFIX . "user_group` SET `permission` = '" . $this->db->escape(json_encode($permissions)) . "' WHERE `user_group_id` = '" . (int)$userGroupId . "'");
+        }
+    }
+
+    private function uninstallDashboardWidget(): void {
+        try {
+            $this->load->model('setting/extension');
+            $this->model_setting_extension->uninstall('dashboard', 'moysklad_sync');
+        } catch (\Throwable $e) {
+            // Не мешаем uninstall.
+        }
+
+        try {
+            $this->load->model('setting/setting');
+            $this->model_setting_setting->deleteSetting('dashboard_moysklad_sync');
+        } catch (\Throwable $e) {
+            // Не мешаем uninstall.
+        }
+
+        try {
+            $this->db->query("DELETE FROM `" . DB_PREFIX . "extension` WHERE `type` = 'dashboard' AND `code` = 'moysklad_sync'");
+            $this->db->query("DELETE FROM `" . DB_PREFIX . "setting` WHERE `key` LIKE 'dashboard_moysklad_sync_%'");
+        } catch (\Throwable $e) {
+            // Не мешаем uninstall.
+        }
+    }
+
+    /**
+     * Event callback: добавляет пункт «МойСклад» в левое меню админки.
+     *
+     * Сигнатура соответствует view/common/column_left/before: route, data, code, output.
+     * Меняем только $data['menus']; стандартный шаблон меню отрисует пункт сам.
+     */
+    public function addAdminMenu(string &$route, array &$data, string &$code = '', string &$output = ''): void {
+        if (empty($this->session->data['user_token'])) {
+            return;
+        }
+
+        if (!$this->user->hasPermission('access', 'extension/moysklad_sync/module/moysklad_sync')) {
+            return;
+        }
+
+        if (!isset($data['menus']) || !is_array($data['menus'])) {
+            return;
+        }
+
+        foreach ($data['menus'] as $menu) {
+            if (($menu['id'] ?? '') === 'menu-moysklad-sync' || ($menu['code'] ?? '') === 'moysklad_sync') {
+                return;
+            }
+        }
+
+        $this->load->language('extension/moysklad_sync/module/moysklad_sync');
+
+        $menu = [
+            'id' => 'menu-moysklad-sync',
+            'icon' => 'fa-solid fa-warehouse',
+            'name' => $this->language->get('text_admin_menu_moysklad'),
+            'href' => $this->url->link('extension/moysklad_sync/module/moysklad_sync', 'user_token=' . $this->session->data['user_token'] . '&tab=products'),
+            'children' => []
+        ];
+
+        // Ставим сразу после Dashboard, чтобы менеджер видел пункт без прокрутки.
+        array_splice($data['menus'], 1, 0, [$menu]);
     }
 
     private function buildPageData(): array {
@@ -549,6 +867,7 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
         $data['run_task_step'] = $this->url->link('extension/moysklad_sync/module/moysklad_sync', $base_query . '&ajax_action=run_task_step');
         $data['get_task_status'] = $this->url->link('extension/moysklad_sync/module/moysklad_sync', $base_query . '&ajax_action=get_task_status');
         $data['stop_task'] = $this->url->link('extension/moysklad_sync/module/moysklad_sync', $base_query . '&ajax_action=stop_task');
+        $data['download_api_debug_log'] = $this->url->link('extension/moysklad_sync/module/moysklad_sync', $base_query . '&ajax_action=download_api_debug_log');
         $data['back'] = $this->url->link('marketplace/extension', 'user_token=' . $this->session->data['user_token'] . '&type=module');
 
         $defaults = $this->getDefaultSettings();
@@ -561,7 +880,7 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
             }
 
             $value = $this->config->get($key);
-            $data[$key] = $value !== null ? $value : $default;
+            $data[$key] = ($value !== null && $value !== '') ? $value : $default;
         }
 
         $data['module_moysklad_sync_warehouse_ids'] = $this->normaliseStringArray($data['module_moysklad_sync_warehouse_ids'] ?? []);
@@ -569,6 +888,8 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
             $data['module_moysklad_sync_warehouse_ids'] = [(string)$data['module_moysklad_sync_warehouse_id']];
         }
         $data['module_moysklad_sync_warehouse_names'] = $this->normaliseStringArray($data['module_moysklad_sync_warehouse_names'] ?? []);
+        $data['module_moysklad_sync_incoming_product_match_mode'] = 'by_moysklad_id';
+        $data['module_moysklad_sync_incoming_quantity_mode'] = 'zero';
 
         $data['action_options'] = [
             'none' => $this->language->get('text_action_none'),
@@ -592,6 +913,7 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
         ];
 
         $data['incoming_product_match_mode_options'] = [
+            'by_moysklad_id' => $this->language->get('text_incoming_match_by_moysklad_id'),
             'separate' => $this->language->get('text_incoming_match_separate'),
             'merge_by_name' => $this->language->get('text_incoming_match_merge_by_name')
         ];
@@ -705,7 +1027,7 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
 
         foreach ($defaults as $key => $default) {
             $value = $this->config->get($key);
-            $settings[$key] = $value !== null ? $value : $default;
+            $settings[$key] = ($value !== null && $value !== '') ? $value : $default;
         }
 
         // Совместимость со старыми установками: раньше выбирался один склад и
@@ -842,7 +1164,8 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
                 'product_id' => (int)($row['product_id'] ?? 0),
                 'name' => (string)($row['name'] ?? ''),
                 'article' => (string)($row['article'] ?? ''),
-                'quantity' => $row['quantity'] === null ? '' : (string)(int)$row['quantity'],
+                'quantity' => $row['quantity'] === null ? '' : (string)(float)$row['quantity'],
+                'site_quantity' => $row['site_quantity'] === null ? '' : (string)(int)$row['site_quantity'],
                 'status' => (int)($row['status'] ?? 0),
                 'stock_status_name' => (string)($row['stock_status_name'] ?? ''),
                 'sync_source' => $source,
@@ -937,11 +1260,10 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
             'zero'
         );
         $settings['module_moysklad_sync_incoming_stock_status_id'] = max(0, (int)($post['module_moysklad_sync_incoming_stock_status_id'] ?? 0));
-        $settings['module_moysklad_sync_incoming_product_match_mode'] = $this->normaliseEnum(
-            $post['module_moysklad_sync_incoming_product_match_mode'] ?? 'separate',
-            ['separate', 'merge_by_name'],
-            'separate'
-        );
+        $settings['module_moysklad_sync_include_incoming_in_site_quantity'] = !empty($post['module_moysklad_sync_include_incoming_in_site_quantity']) ? 1 : 0;
+        // Старые режимы separate/merge_by_name оставлены в коде как legacy, но в
+        // активной логике заказы поставщикам сопоставляются только по ID МойСклад.
+        $settings['module_moysklad_sync_incoming_product_match_mode'] = 'by_moysklad_id';
 
         $settings['module_moysklad_sync_missing_product_action'] = $this->normaliseEnum(
             $post['module_moysklad_sync_missing_product_action'] ?? 'disable',
@@ -974,6 +1296,7 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
         );
 
         $settings['module_moysklad_sync_clear_empty_description'] = !empty($post['module_moysklad_sync_clear_empty_description']) ? 1 : 0;
+        $settings['module_moysklad_sync_api_debug_enabled'] = !empty($post['module_moysklad_sync_api_debug_enabled']) ? 1 : 0;
 
         $settings['module_moysklad_sync_category_batch_size'] = max(1, (int)($post['module_moysklad_sync_category_batch_size'] ?? 30));
         $settings['module_moysklad_sync_product_batch_size'] = max(1, (int)($post['module_moysklad_sync_product_batch_size'] ?? 20));
@@ -1057,7 +1380,8 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
             'module_moysklad_sync_purchase_order_state_ids' => [],
             'module_moysklad_sync_incoming_quantity_mode' => 'zero',
             'module_moysklad_sync_incoming_stock_status_id' => (int)$this->config->get('config_stock_status_id'),
-            'module_moysklad_sync_incoming_product_match_mode' => 'separate',
+            'module_moysklad_sync_include_incoming_in_site_quantity' => 1,
+            'module_moysklad_sync_incoming_product_match_mode' => 'by_moysklad_id',
             'module_moysklad_sync_missing_product_action' => 'disable',
             'module_moysklad_sync_missing_category_action' => 'disable',
             'module_moysklad_sync_zero_stock_action' => 'disable',
@@ -1069,7 +1393,8 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
             'module_moysklad_sync_image_batch_size' => 3,
             'module_moysklad_sync_max_images_per_product' => 5,
             'module_moysklad_sync_max_image_bytes' => 10485760,
-            'module_moysklad_sync_log_level' => 'warning'
+            'module_moysklad_sync_log_level' => 'warning',
+            'module_moysklad_sync_api_debug_enabled' => 0
         ];
     }
 
@@ -1079,7 +1404,7 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
         $postedToken = trim((string)($this->request->post['module_moysklad_sync_api_token'] ?? ''));
         $token = $postedToken !== '' ? $postedToken : (string)$this->config->get('module_moysklad_sync_api_token');
 
-        $http = new HttpClient($token);
+        $http = new HttpClient($token, 'https://api.moysklad.ru/api/remap/1.2', 20, 5, 2, (bool)$this->config->get('module_moysklad_sync_api_debug_enabled'));
 
         return new MoyskladClient($http);
     }
@@ -1087,7 +1412,7 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
     private function createMoyskladClientFromSettings(array $settings): MoyskladClient {
         $this->loadMoyskladLibraries();
 
-        $http = new HttpClient((string)($settings['module_moysklad_sync_api_token'] ?? ''));
+        $http = new HttpClient((string)($settings['module_moysklad_sync_api_token'] ?? ''), 'https://api.moysklad.ru/api/remap/1.2', 20, 5, 2, !empty($settings['module_moysklad_sync_api_debug_enabled']));
 
         return new MoyskladClient($http);
     }
@@ -1126,6 +1451,84 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
         $prefix = $parts ? '[' . implode(', ', $parts) . '] ' : '';
 
         return $prefix . $e->getMessage();
+    }
+
+
+    private function buildDiagnostics(): array {
+        $userGroupId = isset($this->user) && method_exists($this->user, 'getGroupId') ? (int)$this->user->getGroupId() : 0;
+        $warehouseIds = $this->getConfiguredWarehouseIds();
+        $apiLog = $this->getApiDebugLogPath();
+        $storageLogsDir = dirname($apiLog);
+        $imageDir = defined('DIR_IMAGE') ? rtrim((string)DIR_IMAGE, '/\\') . '/' : '';
+        $extensionDir = defined('DIR_EXTENSION') ? rtrim((string)DIR_EXTENSION, '/\\') . '/moysklad_sync/' : '';
+
+        $latestTask = [];
+        $recentLogs = [];
+
+        try {
+            $this->loadTaskModel();
+            $latestTask = $this->model_extension_moysklad_sync_module_moysklad_task->getLatestTask() ?: [];
+            $recentLogs = $this->model_extension_moysklad_sync_module_moysklad_task->getRecentLogs(1);
+        } catch (\Throwable $e) {
+            $latestTask = [];
+            $recentLogs = [[
+                'level' => 'error',
+                'entity_type' => 'diagnostics',
+                'message' => $e->getMessage(),
+                'created_at' => date('Y-m-d H:i:s')
+            ]];
+        }
+
+        return [
+            'version' => self::VERSION,
+            'module_enabled' => (bool)$this->config->get('module_moysklad_sync_status'),
+            'api_token_set' => trim((string)$this->config->get('module_moysklad_sync_api_token')) !== '',
+            'price_type_set' => trim((string)$this->config->get('module_moysklad_sync_price_type_id')) !== '',
+            'warehouses_count' => count($warehouseIds),
+            'purchase_orders_enabled' => (bool)$this->config->get('module_moysklad_sync_purchase_orders_enabled'),
+            'purchase_order_states_count' => count($this->normaliseStringArray($this->config->get('module_moysklad_sync_purchase_order_state_ids') ?? [])),
+            'api_debug_enabled' => (bool)$this->config->get('module_moysklad_sync_api_debug_enabled'),
+            'dashboard_extension' => $this->extensionInstalled('dashboard', 'moysklad_sync'),
+            'dashboard_status' => (int)$this->getSettingValue('dashboard_moysklad_sync_status', 0),
+            'dashboard_width' => (int)$this->getSettingValue('dashboard_moysklad_sync_width', 0),
+            'dashboard_sort_order' => (int)$this->getSettingValue('dashboard_moysklad_sync_sort_order', 0),
+            'permission_module_access' => $this->user->hasPermission('access', 'extension/moysklad_sync/module/moysklad_sync'),
+            'permission_module_modify' => $this->user->hasPermission('modify', 'extension/moysklad_sync/module/moysklad_sync'),
+            'permission_dashboard_access' => $this->user->hasPermission('access', 'extension/moysklad_sync/dashboard/moysklad_sync'),
+            'current_user_group_id' => $userGroupId,
+            'curl_available' => function_exists('curl_init'),
+            'json_available' => function_exists('json_decode'),
+            'image_dir_writable' => $imageDir !== '' && is_dir($imageDir) && is_writable($imageDir),
+            'storage_logs_writable' => is_dir($storageLogsDir) && is_writable($storageLogsDir),
+            'extension_dir_found' => $extensionDir !== '' && is_dir($extensionDir),
+            'api_debug_log_exists' => is_file($apiLog),
+            'api_debug_log_size' => is_file($apiLog) ? (int)filesize($apiLog) : 0,
+            'latest_task' => isset($latestTask['task_id']) ? $this->formatTask($latestTask) : [],
+            'latest_log' => $recentLogs[0] ?? []
+        ];
+    }
+
+    private function extensionInstalled(string $type, string $code): bool {
+        try {
+            $query = $this->db->query("SELECT `extension_id` FROM `" . DB_PREFIX . "extension` WHERE `type` = '" . $this->db->escape($type) . "' AND `code` = '" . $this->db->escape($code) . "' LIMIT 1");
+            return (bool)$query->num_rows;
+        } catch (\Throwable $e) {
+            return false;
+        }
+    }
+
+    private function getSettingValue(string $key, mixed $default = ''): mixed {
+        try {
+            $query = $this->db->query("SELECT `value` FROM `" . DB_PREFIX . "setting` WHERE `store_id` = '0' AND `key` = '" . $this->db->escape($key) . "' LIMIT 1");
+            return $query->num_rows ? $query->row['value'] : $default;
+        } catch (\Throwable $e) {
+            return $default;
+        }
+    }
+
+    private function getApiDebugLogPath(): string {
+        $directory = defined('DIR_STORAGE') ? rtrim((string)DIR_STORAGE, '/\\') . '/logs/' : rtrim(sys_get_temp_dir(), '/\\') . '/';
+        return $directory . 'moysklad_sync_api_debug.log';
     }
 
     private function sendJson(array $json): void {

@@ -4,10 +4,9 @@ namespace MoyskladSync;
 /**
  * Сервис учета ожидаемых поступлений по заказам поставщикам.
  *
- * Фактический остаток и заказ поставщику — разные вещи. Фактический остаток
- * берется из отчета выбранного склада, а заказ поставщику используется только
- * для того, чтобы оставить товар включенным как «ожидаемый», если физически
- * на складе его пока нет.
+ * Позиции заказа поставщику всегда ссылаются на существующую номенклатуру
+ * МойСклад через assortment.meta.href. Поэтому активная логика ищет товар только
+ * по ID МойСклад, а ожидаемое количество может добавляться к quantity сайта.
  */
 class PurchaseOrderSyncService {
     private MoyskladClient $client;
@@ -63,26 +62,15 @@ class PurchaseOrderSyncService {
         $page = $this->client->getPurchaseOrdersPage($limit, $offset);
         $orders = $page['rows'];
         $total = (int)$page['total'];
-        $incomingQuantityMode = (string)($settings['module_moysklad_sync_incoming_quantity_mode'] ?? 'zero');
         $incomingStockStatusId = (int)($settings['module_moysklad_sync_incoming_stock_status_id'] ?? 0);
-        $matchMode = (string)($settings['module_moysklad_sync_incoming_product_match_mode'] ?? 'separate');
-
-        // В режиме объединения по наименованию ожидаемое поступление всегда
-        // хранится отдельно от фактического остатка. Это принципиально: менеджер
-        // должен видеть, сколько можно отгрузить сейчас, а сколько еще едет.
-        // Поэтому настройка "ставить quantity из заказа поставщику" применяется
-        // только к режиму отдельных ожидаемых товаров. При объединении quantity
-        // сайта остается фактическим остатком выбранных складов.
-        if ($matchMode === 'merge_by_name') {
-            $incomingQuantityMode = 'zero';
-        }
+        $includeIncomingInSiteQuantity = !empty($settings['module_moysklad_sync_include_incoming_in_site_quantity']);
 
         $this->taskModel->addLog(
             $taskId,
             'info',
             'purchaseorder',
             null,
-            'Проверяем заказы поставщикам: offset=' . $offset . ', limit=' . $limit . ', rows=' . count($orders) . ', total=' . $total . ', выбранные статусы=' . implode(', ', $selectedStates['values']) . ', режим товаров=' . $matchMode . ', режим количества=' . $incomingQuantityMode . '.'
+            'Проверяем заказы поставщикам: offset=' . $offset . ', limit=' . $limit . ', rows=' . count($orders) . ', total=' . $total . ', выбранные статусы=' . implode(', ', $selectedStates['values']) . ', сопоставление=по ID МойСклад, ожидаемое в quantity сайта=' . ($includeIncomingInSiteQuantity ? 'да' : 'нет') . '.'
         );
 
         $matchedOrders = 0;
@@ -159,11 +147,12 @@ class PurchaseOrderSyncService {
                     ];
 
                     // Если товар уже пришел из фактических остатков под тем же ID,
-                    // не создаем дубль и не меняем реальный quantity. Просто
-                    // добавляем к этой карточке ожидаемое количество из заказа.
+                    // не создаем дубль. Добавляем ожидаемое количество именно к этой
+                    // карточке. В активном режиме product.quantity станет:
+                    // фактический остаток + ожидаемое количество.
                     if (method_exists($this->productModel, 'wasSeenInTask') && $this->productModel->wasSeenInTask($moyskladProductId, $taskId)) {
                         $result = method_exists($this->productModel, 'attachIncomingToProductByMoyskladId')
-                            ? $this->productModel->attachIncomingToProductByMoyskladId($moyskladProductId, $incomingMeta, $taskId)
+                            ? $this->productModel->attachIncomingToProductByMoyskladId($moyskladProductId, $incomingMeta, $taskId, $settings)
                             : 'skipped';
 
                         $stats['processed_items']++;
@@ -172,7 +161,8 @@ class PurchaseOrderSyncService {
                     }
 
                     $product = $this->client->getProductById($moyskladProductId);
-                    $product['quantity'] = $incomingQuantityMode === 'expected' ? $incomingQuantity : 0;
+                    $product['actual_stock_quantity'] = 0;
+                    $product['quantity'] = $includeIncomingInSiteQuantity ? $incomingQuantity : 0;
                     $product['quantity_known'] = true;
                     $product['is_incoming'] = true;
                     $product['incoming_quantity'] = $incomingQuantity;
@@ -190,25 +180,10 @@ class PurchaseOrderSyncService {
                         $product['stock_status_id'] = $incomingStockStatusId;
                     }
 
-                    // Настраиваемый режим: если заказ поставщику содержит позицию с
-                    // тем же наименованием, что и товар в фактических остатках,
-                    // можно не создавать отдельную карточку, а добавить ожидаемое
-                    // количество к уже существующему товару. Сравнение идет по
-                    // нормализованному названию и только с товарами, встреченными
-                    // в текущей задаче как складские.
-                    if ($matchMode === 'merge_by_name' && method_exists($this->productModel, 'findMergeTargetProductIdByName') && method_exists($this->productModel, 'attachIncomingToProductId')) {
-                        $targetProductId = $this->productModel->findMergeTargetProductIdByName((string)($product['name'] ?? ''), $taskId);
-
-                        if ($targetProductId > 0) {
-                            $product['merge_target_name'] = (string)($product['name'] ?? '');
-                            $result = $this->productModel->attachIncomingToProductId($targetProductId, $product, $taskId);
-
-                            $stats['processed_items']++;
-                            $this->accumulateResult($stats, $result);
-                            $this->taskModel->addLog($taskId, 'info', 'purchaseorder_product', $moyskladProductId, 'Позиция заказа поставщику объединена с товаром в наличии по наименованию: ' . (string)($product['name'] ?? '') . '.');
-                            continue;
-                        }
-                    }
+                    // Старый режим объединения по наименованию оставлен в кодовой базе
+                    // как legacy, но в активном сценарии больше не применяется. Заказы
+                    // поставщикам сопоставляются только по стабильному ID номенклатуры
+                    // МойСклад из assortment.meta.href.
 
                     $this->ensureCategoryForProduct($product, $taskId, $settings, $moyskladProductId);
 
