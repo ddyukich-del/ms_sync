@@ -13,3 +13,4 @@ $_['button_open_sync'] = 'Синхронизация';
 $_['button_open_settings'] = 'Настройки';
 
 $_['button_open_diagnostics'] = 'Диагностика';
+$_['button_open_autosync'] = 'Автосинхронизация';

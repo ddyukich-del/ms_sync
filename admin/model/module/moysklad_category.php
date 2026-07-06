@@ -28,19 +28,20 @@ class MoyskladCategory extends \Opencart\System\Engine\Model {
         }
 
         $description = (string)($folder['description'] ?? '');
-        $status = ($folder['archived'] ?? false) === true ? 0 : 1;
+        $sourceStatus = ($folder['archived'] ?? false) === true ? 0 : 1;
+        $statusForExisting = $this->getStatusForExistingCategory($sourceStatus, $settings);
         $parentMoyskladId = (string)($folder['parent_id'] ?? '');
         $hash = $this->makeHash([
             'name' => $name,
             'description' => $description,
-            'status' => $status,
+            'status_policy' => $statusForExisting === null ? 'manual' : (string)$statusForExisting,
             'parent_moysklad_id' => $parentMoyskladId,
         ]);
 
         $link = $this->getLinkByMoyskladId($moyskladId);
 
         if (!$link) {
-            $categoryId = $this->createCategory($name, $description, $status);
+            $categoryId = $this->createCategory($name, $description, $sourceStatus);
             $this->saveLink($categoryId, $moyskladId, $parentMoyskladId, $hash, $taskId);
 
             return 'created';
@@ -55,7 +56,7 @@ class MoyskladCategory extends \Opencart\System\Engine\Model {
         // и категория больше никогда не появится. Поэтому перед обновлением всегда
         // проверяем физическое наличие строки в oc_category.
         if (!$this->categoryExists($categoryId)) {
-            $categoryId = $this->createCategory($name, $description, $status);
+            $categoryId = $this->createCategory($name, $description, $sourceStatus);
             $this->rebindLinkToCategory($moyskladId, $categoryId, $parentMoyskladId, $hash, $taskId);
 
             return 'created';
@@ -69,11 +70,13 @@ class MoyskladCategory extends \Opencart\System\Engine\Model {
             // Связь и хэш могут быть актуальными, но статус в oc_category мог
             // остаться неправильным после старой версии модуля или ручной правки.
             // Поэтому проверяем статус даже при skipped.
-            $this->ensureCategoryStatus($categoryId, $status);
+            if ($statusForExisting !== null) {
+                $this->ensureCategoryStatus($categoryId, $statusForExisting);
+            }
             return 'skipped';
         }
 
-        $this->updateCategory($categoryId, $name, $description, $status);
+        $this->updateCategory($categoryId, $name, $description, $statusForExisting);
         $this->updateLinkHash($moyskladId, $parentMoyskladId, $hash, $taskId);
 
         return 'updated';
@@ -252,6 +255,22 @@ class MoyskladCategory extends \Opencart\System\Engine\Model {
         return $stats;
     }
 
+    private function getStatusForExistingCategory(int $sourceStatus, array $settings): ?int {
+        $mode = (string)($settings['module_moysklad_sync_category_status_mode'] ?? 'preserve_existing');
+
+        if ($mode === 'sync') {
+            return $sourceStatus;
+        }
+
+        if ($mode === 'disable_archived' && $sourceStatus === 0) {
+            return 0;
+        }
+
+        // По умолчанию статус существующих категорий считается ручным полем сайта.
+        // Если менеджер отключил категорию в ocStore, импорт не должен включать ее обратно.
+        return null;
+    }
+
     private function ensureCategoryStatus(int $categoryId, int $status): void {
         $this->db->query("UPDATE `" . DB_PREFIX . "category` SET
             `status` = '" . (int)$status . "',
@@ -315,12 +334,15 @@ class MoyskladCategory extends \Opencart\System\Engine\Model {
         return $categoryId;
     }
 
-    private function updateCategory(int $categoryId, string $name, string $description, int $status): void {
+    private function updateCategory(int $categoryId, string $name, string $description, ?int $status): void {
         $languageId = $this->getRussianLanguageId();
+        $fields = ["`date_modified` = NOW()"]; 
 
-        $this->db->query("UPDATE `" . DB_PREFIX . "category` SET
-            `status` = '" . (int)$status . "',
-            `date_modified` = NOW()
+        if ($status !== null && $this->columnExists('category', 'status')) {
+            $fields[] = "`status` = '" . (int)$status . "'";
+        }
+
+        $this->db->query("UPDATE `" . DB_PREFIX . "category` SET " . implode(', ', $fields) . "
             WHERE `category_id` = '" . (int)$categoryId . "'");
 
         $exists = $this->db->query("SELECT `category_id` FROM `" . DB_PREFIX . "category_description`

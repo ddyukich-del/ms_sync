@@ -34,7 +34,7 @@ class TaskRunner {
         $type = (string)$task['task_type'];
         $step = (string)$task['current_step'];
 
-        $flow = $this->getFlow($type);
+        $flow = $this->getFlow($type, $settings);
 
         if (!$flow) {
             throw new \RuntimeException('Неизвестный тип задачи: ' . $type);
@@ -47,6 +47,9 @@ class TaskRunner {
         switch ($step) {
             case 'init':
                 $taskModel->addLog($taskId, 'info', 'task', (string)$taskId, 'Задача инициализирована.');
+                if ($type === 'import' && empty($settings['module_moysklad_sync_import_categories_enabled'])) {
+                    $taskModel->addLog($taskId, 'info', 'category', null, 'Синхронизация категорий отключена для этого запуска импорта.');
+                }
                 $taskModel->moveToStep($taskId, $this->getNextStep($flow, $step));
                 break;
 
@@ -101,14 +104,27 @@ class TaskRunner {
     }
 
     /** Возвращает маршрут шагов для каждого типа задачи. */
-    private function getFlow(string $type): array {
+    private function getFlow(string $type, array $settings = []): array {
+        if ($type === 'import') {
+            $flow = ['init'];
+
+            // Категории — отдельный справочник productfolder. На живом магазине их
+            // не обязательно синхронизировать при каждом импорте товаров, поэтому
+            // маршрут задачи зависит от флажка конкретного запуска.
+            if (!empty($settings['module_moysklad_sync_import_categories_enabled'])) {
+                $flow[] = 'sync_categories';
+                $flow[] = 'rebuild_category_tree';
+            }
+
+            $flow[] = 'sync_products';
+            $flow[] = 'sync_incoming_products';
+            $flow[] = 'process_missing_products';
+            $flow[] = 'finish';
+
+            return $flow;
+        }
+
         return match ($type) {
-            // Категории синхронизируем как справочник МойСклад целиком через productfolder,
-            // без ограничения выбранным складом. Пока не удаляем категории в конце
-            // импорта: сначала нужно на живом API подтвердить формат productfolder
-            // через moysklad_sync_api_debug.log. Товары при этом импортируются
-            // только из отчета положительных остатков выбранного склада.
-            'import' => ['init', 'sync_categories', 'rebuild_category_tree', 'sync_products', 'sync_incoming_products', 'process_missing_products', 'finish'],
             'stock' => ['init', 'sync_stock', 'finish'],
             'images' => ['init', 'sync_images', 'finish'],
             default => []

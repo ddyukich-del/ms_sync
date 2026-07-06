@@ -61,6 +61,7 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
         $data = array_merge($data, $summary);
         $data['products_url'] = $this->url->link('extension/moysklad_sync/module/moysklad_sync', 'user_token=' . $userToken . '&tab=products');
         $data['sync_url'] = $this->url->link('extension/moysklad_sync/module/moysklad_sync', 'user_token=' . $userToken . '&tab=sync');
+        $data['autosync_url'] = $this->url->link('extension/moysklad_sync/module/moysklad_sync', 'user_token=' . $userToken . '&tab=autosync');
         $data['diagnostics_url'] = $this->url->link('extension/moysklad_sync/module/moysklad_sync', 'user_token=' . $userToken . '&tab=diagnostics');
         $data['settings_url'] = $this->url->link('extension/moysklad_sync/module/moysklad_sync', 'user_token=' . $userToken);
 
