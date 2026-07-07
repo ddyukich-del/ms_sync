@@ -13,7 +13,7 @@ use MoyskladSync\TaskRunner;
 
 class MoyskladSync extends \Opencart\System\Engine\Controller {
     private const SETTING_CODE = 'module_moysklad_sync';
-    private const VERSION = '1.1.0';
+    private const VERSION = '1.1.5';
     private const CRON_ROUTE = 'extension/moysklad_sync/cron/moysklad_sync';
 
     private array $error = [];
@@ -428,6 +428,7 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
             $this->language->get('column_stock_status'),
             $this->language->get('column_purchase_order'),
             $this->language->get('column_purchase_order_state'),
+            $this->language->get('column_purchase_order_store'),
             $this->language->get('column_updated')
         ], ';');
 
@@ -443,6 +444,7 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
                 (string)($row['stock_status_name'] ?? ''),
                 (string)($row['purchase_order_name'] ?? ''),
                 (string)($row['purchase_order_state_name'] ?? ''),
+                (string)($row['purchase_order_store_name'] ?? ''),
                 (string)($row['last_synced_at'] ?? '')
             ], ';');
         }
@@ -1228,6 +1230,7 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
                 'expected_quantity' => $row['incoming_quantity'] === null ? '' : (string)(float)$row['incoming_quantity'],
                 'purchase_order_name' => (string)($row['purchase_order_name'] ?? ''),
                 'purchase_order_state_name' => (string)($row['purchase_order_state_name'] ?? ''),
+                'purchase_order_store_name' => (string)($row['purchase_order_store_name'] ?? ''),
                 'last_stock_quantity' => $row['last_stock_quantity'] === null ? '' : (string)(float)$row['last_stock_quantity'],
                 'last_synced_at' => (string)($row['last_synced_at'] ?? ''),
             ];

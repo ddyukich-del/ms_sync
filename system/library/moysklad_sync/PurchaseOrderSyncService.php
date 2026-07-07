@@ -45,8 +45,30 @@ class PurchaseOrderSyncService {
             'error_items' => 0,
         ];
 
+        if ($offset === 0) {
+            if (method_exists($this->productModel, 'resetIncomingQuantitiesBeforePurchaseOrderSync')) {
+                try {
+                    $cleared = (int)$this->productModel->resetIncomingQuantitiesBeforePurchaseOrderSync($taskId, $settings);
+                    $this->taskModel->addLog($taskId, 'info', 'purchaseorder', null, 'Перед пересчетом заказов поставщикам очищены старые ожидаемые количества: записей=' . $cleared . '.');
+                } catch (\Throwable $e) {
+                    $this->taskModel->addError($taskId, 'purchaseorder', null, 'PURCHASE_ORDER_INCOMING_RESET_ERROR', $e->getMessage(), []);
+                    throw $e;
+                }
+            } else {
+                $this->taskModel->addLog($taskId, 'warning', 'purchaseorder', null, 'Метод очистки старых ожидаемых количеств недоступен. Обновите модель товаров модуля.');
+            }
+        }
+
         if (empty($settings['module_moysklad_sync_purchase_orders_enabled'])) {
-            $this->taskModel->addLog($taskId, 'info', 'purchaseorder', null, 'Учет заказов поставщикам выключен. Переходим к обработке отсутствующих товаров.');
+            $this->taskModel->addLog($taskId, 'info', 'purchaseorder', null, 'Учет заказов поставщикам выключен. Старые ожидаемые количества очищены, переходим к обработке отсутствующих товаров.');
+            $this->taskModel->moveToStep($taskId, 'process_missing_products', (int)($settings['module_moysklad_sync_product_batch_size'] ?? 20));
+            return $this->taskModel->getTask($taskId) ?: [];
+        }
+
+        $selectedWarehouses = $this->normalizeSelectedWarehouses($settings);
+
+        if (!$selectedWarehouses['values']) {
+            $this->taskModel->addLog($taskId, 'warning', 'purchaseorder', null, 'Учет заказов поставщикам включен, но склады модуля не выбраны. Ожидаемые товары не импортируются.');
             $this->taskModel->moveToStep($taskId, 'process_missing_products', (int)($settings['module_moysklad_sync_product_batch_size'] ?? 20));
             return $this->taskModel->getTask($taskId) ?: [];
         }
@@ -70,7 +92,7 @@ class PurchaseOrderSyncService {
             'info',
             'purchaseorder',
             null,
-            'Проверяем заказы поставщикам: offset=' . $offset . ', limit=' . $limit . ', rows=' . count($orders) . ', total=' . $total . ', выбранные статусы=' . implode(', ', $selectedStates['values']) . ', сопоставление=по ID МойСклад, ожидаемое в quantity сайта=' . ($includeIncomingInSiteQuantity ? 'да' : 'нет') . '.'
+            'Проверяем заказы поставщикам: offset=' . $offset . ', limit=' . $limit . ', rows=' . count($orders) . ', total=' . $total . ', выбранные статусы=' . implode(', ', $selectedStates['values']) . ', выбранные склады=' . implode(', ', $selectedWarehouses['values']) . ', сопоставление=по ID МойСклад, ожидаемое в quantity сайта=' . ($includeIncomingInSiteQuantity ? 'да' : 'нет') . '.'
         );
 
         $matchedOrders = 0;
@@ -94,12 +116,18 @@ class PurchaseOrderSyncService {
                 continue;
             }
 
+            if (!$this->orderMatchesSelectedWarehouses($order, $selectedWarehouses)) {
+                $stats['skipped_items']++;
+                $this->taskModel->addLog($taskId, 'info', 'purchaseorder', $orderId, 'Заказ поставщику пропущен по складу: №' . $orderName . ', store_id=' . (string)($order['store_id'] ?? '') . ', store_name=' . (string)($order['store_name'] ?? '') . '.');
+                continue;
+            }
+
             $matchedOrders++;
 
             try {
                 $positions = $this->client->getPurchaseOrderPositions($orderId);
                 $positionsLoaded += count($positions);
-                $this->taskModel->addLog($taskId, 'info', 'purchaseorder', $orderId, 'Заказ поставщику подходит по статусу: №' . $orderName . '. Позиции: ' . count($positions) . '.');
+                $this->taskModel->addLog($taskId, 'info', 'purchaseorder', $orderId, 'Заказ поставщику учтен: №' . $orderName . ', склад=' . ((string)($order['store_name'] ?? '') !== '' ? (string)$order['store_name'] : (string)($order['store_id'] ?? '')) . '. Позиции: ' . count($positions) . '.');
             } catch (\Throwable $e) {
                 $stats['error_items']++;
                 $this->taskModel->addError($taskId, 'purchaseorder', $orderId, 'PURCHASE_ORDER_POSITIONS_ERROR', $e->getMessage(), $order);
@@ -132,6 +160,13 @@ class PurchaseOrderSyncService {
                     if ($incomingQuantity <= 0) {
                         $stats['processed_items']++;
                         $stats['skipped_items']++;
+                        $this->taskModel->addLog(
+                            $taskId,
+                            'info',
+                            'purchaseorder_product',
+                            $moyskladProductId !== '' ? $moyskladProductId : $orderId,
+                            'Позиция заказа поставщику пропущена: к поступлению 0. Заказано=' . (string)($position['ordered_quantity'] ?? '') . ', принято=' . (string)($position['shipped_quantity'] ?? '') . ', в пути=' . (string)($position['in_transit_quantity'] ?? '') . ', товар=' . (string)($position['name'] ?? '') . '.'
+                        );
                         continue;
                     }
 
@@ -144,6 +179,8 @@ class PurchaseOrderSyncService {
                         'purchase_order_name' => $orderName,
                         'purchase_order_state_id' => (string)($order['state_id'] ?? ''),
                         'purchase_order_state_name' => (string)($order['state_name'] ?? ''),
+                        'purchase_order_store_id' => (string)($order['store_id'] ?? ''),
+                        'purchase_order_store_name' => (string)($order['store_name'] ?? ''),
                     ];
 
                     // Если товар уже пришел из фактических остатков под тем же ID,
@@ -170,6 +207,8 @@ class PurchaseOrderSyncService {
                     $product['purchase_order_name'] = $orderName;
                     $product['purchase_order_state_id'] = (string)($order['state_id'] ?? '');
                     $product['purchase_order_state_name'] = (string)($order['state_name'] ?? '');
+                    $product['purchase_order_store_id'] = (string)($order['store_id'] ?? '');
+                    $product['purchase_order_store_name'] = (string)($order['store_name'] ?? '');
 
                     // Товар ожидается к поступлению, поэтому он должен быть включен,
                     // даже если физический остаток 0. stock_status_id показывает
@@ -242,6 +281,58 @@ class PurchaseOrderSyncService {
                 'path_name' => (string)($product['path_name'] ?? ''),
             ]);
         }
+    }
+
+
+    private function normalizeSelectedWarehouses(array $settings): array {
+        $raw = $settings['module_moysklad_sync_warehouse_ids'] ?? [];
+
+        if (is_string($raw)) {
+            $decoded = json_decode($raw, true);
+            $raw = is_array($decoded) ? $decoded : [$raw];
+        }
+
+        if (!is_array($raw)) {
+            $raw = [];
+        }
+
+        if (!$raw && !empty($settings['module_moysklad_sync_warehouse_id'])) {
+            $raw[] = (string)$settings['module_moysklad_sync_warehouse_id'];
+        }
+
+        $values = [];
+        $lookup = [];
+
+        foreach ($raw as $warehouseId) {
+            $warehouseId = trim((string)$warehouseId);
+
+            if ($warehouseId === '') {
+                continue;
+            }
+
+            $values[$warehouseId] = $warehouseId;
+            $lookup[$this->normalizeComparable($warehouseId)] = true;
+            $lookup[$this->normalizeComparable('https://api.moysklad.ru/api/remap/1.2/entity/store/' . $warehouseId)] = true;
+        }
+
+        return ['values' => array_values($values), 'lookup' => $lookup];
+    }
+
+    private function orderMatchesSelectedWarehouses(array $order, array $selectedWarehouses): bool {
+        $candidates = [
+            (string)($order['store_id'] ?? ''),
+            (string)($order['store_href'] ?? ''),
+        ];
+
+        foreach ($candidates as $candidate) {
+            $key = $this->normalizeComparable($candidate);
+
+            if ($key !== '' && !empty($selectedWarehouses['lookup'][$key])) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function normalizeSelectedStates(mixed $value): array {

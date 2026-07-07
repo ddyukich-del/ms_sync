@@ -157,7 +157,107 @@ class MoyskladProduct extends \Opencart\System\Engine\Model {
         return $stats;
     }
 
+    /**
+     * Очищает ожидаемые количества перед новым пересчетом заказов поставщикам.
+     *
+     * Это защищает от старых ошибочных значений: сначала убираем все incoming-данные,
+     * затем PurchaseOrderSyncService заново добавляет только те поставки, которые
+     * подходят по выбранному статусу и выбранным складам модуля.
+     */
+    public function resetIncomingQuantitiesBeforePurchaseOrderSync(int $taskId, array $settings = []): int {
+        if (!$this->tableExists('moysklad_product_link')) {
+            return 0;
+        }
 
+        $linkTable = DB_PREFIX . 'moysklad_product_link';
+        $wherePartsAliased = [];
+        $wherePartsPlain = [];
+
+        if ($this->columnExists('moysklad_product_link', 'sync_source')) {
+            $wherePartsAliased[] = "l.`sync_source` IN ('incoming', 'stock_incoming')";
+            $wherePartsPlain[] = "`sync_source` IN ('incoming', 'stock_incoming')";
+        }
+
+        if ($this->columnExists('moysklad_product_link', 'incoming_quantity')) {
+            $wherePartsAliased[] = "COALESCE(l.`incoming_quantity`, 0) > 0";
+            $wherePartsPlain[] = "COALESCE(`incoming_quantity`, 0) > 0";
+        }
+
+        foreach (['purchase_order_id', 'purchase_order_name', 'purchase_order_state_id', 'purchase_order_state_name', 'purchase_order_store_id', 'purchase_order_store_name'] as $column) {
+            if ($this->columnExists('moysklad_product_link', $column)) {
+                $wherePartsAliased[] = "(l.`" . $column . "` IS NOT NULL AND l.`" . $column . "` <> '')";
+                $wherePartsPlain[] = "(`" . $column . "` IS NOT NULL AND `" . $column . "` <> '')";
+            }
+        }
+
+        if (!$wherePartsAliased || !$wherePartsPlain) {
+            return 0;
+        }
+
+        $whereAliased = '(' . implode(' OR ', $wherePartsAliased) . ')';
+        $wherePlain = '(' . implode(' OR ', $wherePartsPlain) . ')';
+        $hasLastStockQuantity = $this->columnExists('moysklad_product_link', 'last_stock_quantity');
+        $stockExprAliased = $hasLastStockQuantity ? "COALESCE(l.`last_stock_quantity`, 0)" : "0";
+        $stockExprPlain = $hasLastStockQuantity ? "COALESCE(`last_stock_quantity`, 0)" : "0";
+
+        $countQuery = $this->db->query("SELECT COUNT(*) AS total FROM `" . $linkTable . "` l WHERE " . $whereAliased);
+        $total = (int)($countQuery->row['total'] ?? 0);
+
+        if ($total <= 0) {
+            return 0;
+        }
+
+        if ($this->tableExists('product')) {
+            $productTable = DB_PREFIX . 'product';
+            $productSet = [
+                "p.`quantity` = GREATEST(0, FLOOR(" . $stockExprAliased . "))",
+                "p.`date_modified` = NOW()",
+            ];
+
+            $zeroAction = (string)($settings['module_moysklad_sync_zero_stock_action'] ?? 'disable');
+            if ($this->columnExists('product', 'status')) {
+                if (in_array($zeroAction, ['disable', 'delete'], true)) {
+                    $productSet[] = "p.`status` = CASE WHEN " . $stockExprAliased . " > 0 THEN 1 ELSE 0 END";
+                } else {
+                    $productSet[] = "p.`status` = CASE WHEN " . $stockExprAliased . " > 0 THEN 1 ELSE p.`status` END";
+                }
+            }
+
+            if ($this->columnExists('product', 'stock_status_id') && in_array($zeroAction, ['disable', 'delete'], true)) {
+                $outOfStockStatusId = $this->getOutOfStockStatusId();
+                $productSet[] = "p.`stock_status_id` = CASE WHEN " . $stockExprAliased . " > 0 THEN p.`stock_status_id` ELSE '" . (int)$outOfStockStatusId . "' END";
+            }
+
+            $this->db->query("UPDATE `" . $productTable . "` p
+                INNER JOIN `" . $linkTable . "` l ON (l.`product_id` = p.`product_id`)
+                SET " . implode(', ', $productSet) . "
+                WHERE " . $whereAliased);
+        }
+
+        $linkSet = [];
+
+        if ($this->columnExists('moysklad_product_link', 'sync_source')) {
+            $linkSet[] = "`sync_source` = CASE WHEN " . $stockExprPlain . " > 0 THEN 'stock' ELSE 'missing' END";
+        }
+
+        foreach (['incoming_quantity', 'purchase_order_id', 'purchase_order_name', 'purchase_order_state_id', 'purchase_order_state_name', 'purchase_order_store_id', 'purchase_order_store_name'] as $column) {
+            if ($this->columnExists('moysklad_product_link', $column)) {
+                $linkSet[] = "`" . $column . "` = NULL";
+            }
+        }
+
+        if ($this->columnExists('moysklad_product_link', 'updated_at')) {
+            $linkSet[] = "`updated_at` = NOW()";
+        }
+
+        if ($linkSet) {
+            $this->db->query("UPDATE `" . $linkTable . "`
+                SET " . implode(', ', $linkSet) . "
+                WHERE " . $wherePlain);
+        }
+
+        return $total;
+    }
 
     /**
      * Обновляет только остаток товара по строке отчета МойСклад.
@@ -316,6 +416,8 @@ class MoyskladProduct extends \Opencart\System\Engine\Model {
             'purchase_order_name' => $hasIncoming ? (string)($link['purchase_order_name'] ?? '') : null,
             'purchase_order_state_id' => $hasIncoming ? (string)($link['purchase_order_state_id'] ?? '') : null,
             'purchase_order_state_name' => $hasIncoming ? (string)($link['purchase_order_state_name'] ?? '') : null,
+            'purchase_order_store_id' => $hasIncoming ? (string)($link['purchase_order_store_id'] ?? '') : null,
+            'purchase_order_store_name' => $hasIncoming ? (string)($link['purchase_order_store_name'] ?? '') : null,
             'last_stock_quantity' => $actualStockQuantity,
             'last_seen_task_id' => $taskId,
             'last_seen_at' => date('Y-m-d H:i:s'),
@@ -349,6 +451,8 @@ class MoyskladProduct extends \Opencart\System\Engine\Model {
             'purchase_order_name' => $hasIncoming ? (string)($link['purchase_order_name'] ?? '') : null,
             'purchase_order_state_id' => $hasIncoming ? (string)($link['purchase_order_state_id'] ?? '') : null,
             'purchase_order_state_name' => $hasIncoming ? (string)($link['purchase_order_state_name'] ?? '') : null,
+            'purchase_order_store_id' => $hasIncoming ? (string)($link['purchase_order_store_id'] ?? '') : null,
+            'purchase_order_store_name' => $hasIncoming ? (string)($link['purchase_order_store_name'] ?? '') : null,
             'last_stock_quantity' => $stock,
             'last_seen_task_id' => $taskId,
             'last_seen_at' => date('Y-m-d H:i:s'),
@@ -370,6 +474,8 @@ class MoyskladProduct extends \Opencart\System\Engine\Model {
             'purchase_order_name' => null,
             'purchase_order_state_id' => null,
             'purchase_order_state_name' => null,
+            'purchase_order_store_id' => null,
+            'purchase_order_store_name' => null,
             'last_stock_quantity' => 0,
             'updated_at' => date('Y-m-d H:i:s'),
         ];
@@ -416,6 +522,8 @@ class MoyskladProduct extends \Opencart\System\Engine\Model {
             'purchase_order_name' => (string)($product['purchase_order_name'] ?? ''),
             'purchase_order_state_id' => (string)($product['purchase_order_state_id'] ?? ''),
             'purchase_order_state_name' => (string)($product['purchase_order_state_name'] ?? ''),
+            'purchase_order_store_id' => (string)($product['purchase_order_store_id'] ?? ''),
+            'purchase_order_store_name' => (string)($product['purchase_order_store_name'] ?? ''),
             'category_moysklad_id' => (string)($product['category_id'] ?? ''),
             'manufacturer_name' => trim((string)($product['manufacturer_name'] ?? '')),
             'weight' => isset($product['weight']) && is_numeric($product['weight']) ? (float)$product['weight'] : 0.0,
@@ -826,6 +934,8 @@ class MoyskladProduct extends \Opencart\System\Engine\Model {
             'purchase_order_name' => $isIncoming ? (string)($product['purchase_order_name'] ?? '') : null,
             'purchase_order_state_id' => $isIncoming ? (string)($product['purchase_order_state_id'] ?? '') : null,
             'purchase_order_state_name' => $isIncoming ? (string)($product['purchase_order_state_name'] ?? '') : null,
+            'purchase_order_store_id' => $isIncoming ? (string)($product['purchase_order_store_id'] ?? '') : null,
+            'purchase_order_store_name' => $isIncoming ? (string)($product['purchase_order_store_name'] ?? '') : null,
             'last_stock_quantity' => $actualStockQuantity,
         ];
     }
@@ -954,7 +1064,7 @@ class MoyskladProduct extends \Opencart\System\Engine\Model {
         if ($search !== '') {
             $escaped = $this->db->escape($search);
             $like = "LIKE '%" . $escaped . "%'";
-            $where[] = "(pd.`name` " . $like . " OR l.`article` " . $like . " OR l.`purchase_order_name` " . $like . " OR l.`purchase_order_state_name` " . $like . ")";
+            $where[] = "(pd.`name` " . $like . " OR l.`article` " . $like . " OR l.`purchase_order_name` " . $like . " OR l.`purchase_order_state_name` " . $like . " OR l.`purchase_order_store_name` " . $like . ")";
         }
 
         $source = (string)($filter['source'] ?? '');
@@ -999,6 +1109,7 @@ class MoyskladProduct extends \Opencart\System\Engine\Model {
             'expected' => "COALESCE(l.`incoming_quantity`, 0)",
             'stock_status' => ($stockStatusJoin ? "ss.`name`" : "p.`stock_status_id`"),
             'purchase_order' => "l.`purchase_order_name`",
+            'purchase_order_store' => "l.`purchase_order_store_name`",
             'updated' => "l.`last_synced_at`",
             'id' => "l.`product_id`"
         ];
@@ -1014,6 +1125,7 @@ class MoyskladProduct extends \Opencart\System\Engine\Model {
                 l.`incoming_quantity`,
                 l.`purchase_order_name`,
                 l.`purchase_order_state_name`,
+                l.`purchase_order_store_name`,
                 l.`last_stock_quantity`,
                 l.`last_synced_at`,
                 p.`quantity`,
@@ -1049,6 +1161,7 @@ class MoyskladProduct extends \Opencart\System\Engine\Model {
                 'incoming_quantity' => $row['incoming_quantity'] !== null ? (float)$row['incoming_quantity'] : null,
                 'purchase_order_name' => (string)($row['purchase_order_name'] ?? ''),
                 'purchase_order_state_name' => (string)($row['purchase_order_state_name'] ?? ''),
+                'purchase_order_store_name' => (string)($row['purchase_order_store_name'] ?? ''),
                 'last_stock_quantity' => $row['last_stock_quantity'] !== null ? (float)$row['last_stock_quantity'] : null,
                 'last_synced_at' => (string)($row['last_synced_at'] ?? ''),
             ];
@@ -1141,6 +1254,8 @@ class MoyskladProduct extends \Opencart\System\Engine\Model {
         $stateName = $this->appendUniqueListValue((string)($link['purchase_order_state_name'] ?? ''), (string)($incomingProduct['purchase_order_state_name'] ?? ''));
         $orderId = $this->appendUniqueListValue((string)($link['purchase_order_id'] ?? ''), (string)($incomingProduct['purchase_order_id'] ?? ''));
         $stateId = $this->appendUniqueListValue((string)($link['purchase_order_state_id'] ?? ''), (string)($incomingProduct['purchase_order_state_id'] ?? ''));
+        $storeId = $this->appendUniqueListValue((string)($link['purchase_order_store_id'] ?? ''), (string)($incomingProduct['purchase_order_store_id'] ?? ''));
+        $storeName = $this->appendUniqueListValue((string)($link['purchase_order_store_name'] ?? ''), (string)($incomingProduct['purchase_order_store_name'] ?? ''));
 
         $fields = [
             'sync_source' => 'stock_incoming',
@@ -1149,6 +1264,8 @@ class MoyskladProduct extends \Opencart\System\Engine\Model {
             'purchase_order_name' => $orderName,
             'purchase_order_state_id' => $stateId,
             'purchase_order_state_name' => $stateName,
+            'purchase_order_store_id' => $storeId,
+            'purchase_order_store_name' => $storeName,
             'last_seen_task_id' => $taskId,
             'last_seen_at' => date('Y-m-d H:i:s'),
             'last_synced_at' => date('Y-m-d H:i:s'),

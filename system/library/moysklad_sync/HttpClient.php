@@ -102,7 +102,7 @@ class HttpClient {
         $headers = [
             'Accept: image/*,*/*;q=0.8',
             'Authorization: Bearer ' . $this->token,
-            'User-Agent: ocstore-moysklad-sync/1.1.0'
+            'User-Agent: ocstore-moysklad-sync/1.1.5'
         ];
 
         curl_setopt_array($ch, [
@@ -185,7 +185,7 @@ class HttpClient {
             'Accept: application/json;charset=utf-8',
             'Content-Type: application/json;charset=utf-8',
             'Authorization: Bearer ' . $this->token,
-            'User-Agent: ocstore-moysklad-sync/1.1.0'
+            'User-Agent: ocstore-moysklad-sync/1.1.5'
         ];
 
         $ch = curl_init($url);
