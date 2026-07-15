@@ -2,6 +2,10 @@
 namespace Opencart\Admin\Model\Extension\MoyskladSync\Module;
 
 /**
+ * @author d_dyuk
+ */
+
+/**
  * Модель очереди задач.
  *
  * Здесь сосредоточены все SQL-операции по задачам, логам и ошибкам. Контроллер

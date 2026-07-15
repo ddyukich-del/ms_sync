@@ -2,6 +2,10 @@
 namespace Opencart\Admin\Model\Extension\MoyskladSync\Module;
 
 /**
+ * @author d_dyuk
+ */
+
+/**
  * Модель работы с товарами ocStore.
  *
  * Здесь собраны все SQL-операции по товарам: создание, обновление, отключение,
@@ -85,12 +89,8 @@ class MoyskladProduct extends \Opencart\System\Engine\Model {
             // сбросить quantity к своему остатку, а следующие склады прибавят свои
             // остатки через addStockQuantityFromMoysklad(). Иначе при повторном
             // импорте можно получить задвоение количества.
-            if ($data['quantity_known']) {
-                if ($data['is_incoming']) {
-                    $this->setProductIncomingQuantity($productId, (int)floor((float)$data['quantity']), (int)$data['stock_status_id']);
-                } else {
-                    $this->setProductStockQuantity($productId, (int)floor((float)$data['quantity']));
-                }
+            if ($data['quantity_known'] && !$data['is_incoming']) {
+                $this->setProductStockQuantity($productId, (int)floor((float)$data['quantity']));
             }
 
             // Даже если данные товара не изменились, связь товара с категорией
@@ -157,107 +157,7 @@ class MoyskladProduct extends \Opencart\System\Engine\Model {
         return $stats;
     }
 
-    /**
-     * Очищает ожидаемые количества перед новым пересчетом заказов поставщикам.
-     *
-     * Это защищает от старых ошибочных значений: сначала убираем все incoming-данные,
-     * затем PurchaseOrderSyncService заново добавляет только те поставки, которые
-     * подходят по выбранному статусу и выбранным складам модуля.
-     */
-    public function resetIncomingQuantitiesBeforePurchaseOrderSync(int $taskId, array $settings = []): int {
-        if (!$this->tableExists('moysklad_product_link')) {
-            return 0;
-        }
 
-        $linkTable = DB_PREFIX . 'moysklad_product_link';
-        $wherePartsAliased = [];
-        $wherePartsPlain = [];
-
-        if ($this->columnExists('moysklad_product_link', 'sync_source')) {
-            $wherePartsAliased[] = "l.`sync_source` IN ('incoming', 'stock_incoming')";
-            $wherePartsPlain[] = "`sync_source` IN ('incoming', 'stock_incoming')";
-        }
-
-        if ($this->columnExists('moysklad_product_link', 'incoming_quantity')) {
-            $wherePartsAliased[] = "COALESCE(l.`incoming_quantity`, 0) > 0";
-            $wherePartsPlain[] = "COALESCE(`incoming_quantity`, 0) > 0";
-        }
-
-        foreach (['purchase_order_id', 'purchase_order_name', 'purchase_order_state_id', 'purchase_order_state_name', 'purchase_order_store_id', 'purchase_order_store_name'] as $column) {
-            if ($this->columnExists('moysklad_product_link', $column)) {
-                $wherePartsAliased[] = "(l.`" . $column . "` IS NOT NULL AND l.`" . $column . "` <> '')";
-                $wherePartsPlain[] = "(`" . $column . "` IS NOT NULL AND `" . $column . "` <> '')";
-            }
-        }
-
-        if (!$wherePartsAliased || !$wherePartsPlain) {
-            return 0;
-        }
-
-        $whereAliased = '(' . implode(' OR ', $wherePartsAliased) . ')';
-        $wherePlain = '(' . implode(' OR ', $wherePartsPlain) . ')';
-        $hasLastStockQuantity = $this->columnExists('moysklad_product_link', 'last_stock_quantity');
-        $stockExprAliased = $hasLastStockQuantity ? "COALESCE(l.`last_stock_quantity`, 0)" : "0";
-        $stockExprPlain = $hasLastStockQuantity ? "COALESCE(`last_stock_quantity`, 0)" : "0";
-
-        $countQuery = $this->db->query("SELECT COUNT(*) AS total FROM `" . $linkTable . "` l WHERE " . $whereAliased);
-        $total = (int)($countQuery->row['total'] ?? 0);
-
-        if ($total <= 0) {
-            return 0;
-        }
-
-        if ($this->tableExists('product')) {
-            $productTable = DB_PREFIX . 'product';
-            $productSet = [
-                "p.`quantity` = GREATEST(0, FLOOR(" . $stockExprAliased . "))",
-                "p.`date_modified` = NOW()",
-            ];
-
-            $zeroAction = (string)($settings['module_moysklad_sync_zero_stock_action'] ?? 'disable');
-            if ($this->columnExists('product', 'status')) {
-                if (in_array($zeroAction, ['disable', 'delete'], true)) {
-                    $productSet[] = "p.`status` = CASE WHEN " . $stockExprAliased . " > 0 THEN 1 ELSE 0 END";
-                } else {
-                    $productSet[] = "p.`status` = CASE WHEN " . $stockExprAliased . " > 0 THEN 1 ELSE p.`status` END";
-                }
-            }
-
-            if ($this->columnExists('product', 'stock_status_id') && in_array($zeroAction, ['disable', 'delete'], true)) {
-                $outOfStockStatusId = $this->getOutOfStockStatusId();
-                $productSet[] = "p.`stock_status_id` = CASE WHEN " . $stockExprAliased . " > 0 THEN p.`stock_status_id` ELSE '" . (int)$outOfStockStatusId . "' END";
-            }
-
-            $this->db->query("UPDATE `" . $productTable . "` p
-                INNER JOIN `" . $linkTable . "` l ON (l.`product_id` = p.`product_id`)
-                SET " . implode(', ', $productSet) . "
-                WHERE " . $whereAliased);
-        }
-
-        $linkSet = [];
-
-        if ($this->columnExists('moysklad_product_link', 'sync_source')) {
-            $linkSet[] = "`sync_source` = CASE WHEN " . $stockExprPlain . " > 0 THEN 'stock' ELSE 'missing' END";
-        }
-
-        foreach (['incoming_quantity', 'purchase_order_id', 'purchase_order_name', 'purchase_order_state_id', 'purchase_order_state_name', 'purchase_order_store_id', 'purchase_order_store_name'] as $column) {
-            if ($this->columnExists('moysklad_product_link', $column)) {
-                $linkSet[] = "`" . $column . "` = NULL";
-            }
-        }
-
-        if ($this->columnExists('moysklad_product_link', 'updated_at')) {
-            $linkSet[] = "`updated_at` = NOW()";
-        }
-
-        if ($linkSet) {
-            $this->db->query("UPDATE `" . $linkTable . "`
-                SET " . implode(', ', $linkSet) . "
-                WHERE " . $wherePlain);
-        }
-
-        return $total;
-    }
 
     /**
      * Обновляет только остаток товара по строке отчета МойСклад.
@@ -283,19 +183,16 @@ class MoyskladProduct extends \Opencart\System\Engine\Model {
         }
 
         $productId = (int)$link['product_id'];
-        $actualStockQuantity = max(0.0, (float)($stockRow['stock'] ?? 0));
-        $quantity = (int)floor($actualStockQuantity);
+        $quantity = max(0, (int)floor((float)($stockRow['stock'] ?? 0)));
         $zeroAction = (string)($settings['module_moysklad_sync_zero_stock_action'] ?? 'disable');
         $hasIncoming = $this->linkHasIncoming($link);
-        $incomingQuantity = $hasIncoming ? $this->getLinkIncomingQuantity($link) : 0.0;
-        $siteQuantity = $this->calculateSiteQuantity($actualStockQuantity, $incomingQuantity, $settings);
 
         // Важно: отдельная кнопка «Обновить остатки» НЕ пересчитывает заказы
         // поставщикам. Поэтому она не имеет права удалять/отключать товары,
         // которые сейчас существуют как ожидаемые по заказу поставщику. Если
-        // фактический остаток стал 0, но есть ожидаемая поставка, карточка
-        // остается включенной, а quantity сайта считается по настройке:
-        // фактический остаток + ожидаемое количество или только факт.
+        // фактический остаток стал 0, оставляем карточку включенной, quantity
+        // держим как реальный остаток, а incoming_quantity и данные заказа
+        // сохраняем в служебной таблице.
         if ($quantity <= 0 && $zeroAction === 'delete' && !$hasIncoming) {
             $this->deleteProduct($productId);
             return 'deleted';
@@ -310,18 +207,16 @@ class MoyskladProduct extends \Opencart\System\Engine\Model {
         }
 
         $fields = [
-            'quantity' => (int)floor($siteQuantity),
+            'quantity' => $quantity,
             'date_modified' => date('Y-m-d H:i:s')
         ];
 
-        // Если товар появился на складе или доступен к продаже за счет ожидаемой
-        // поставки — включаем его. Если факта нет, но поставка ожидается, ставим
-        // выбранный статус наличия «Ожидается/Предзаказ».
-        if ($quantity > 0 || ($hasIncoming && $siteQuantity > 0)) {
+        // Если товар появился на складе снова — включаем его обратно. Если остаток 0
+        // и товар ожидается от поставщика — тоже оставляем включенным, но не
+        // смешиваем фактический остаток с ожидаемым. Только если товара нет ни на
+        // складе, ни в заказах поставщику, применяем политику нулевого остатка.
+        if ($quantity > 0) {
             $fields['status'] = 1;
-            if ($quantity <= 0 && $hasIncoming) {
-                $fields['stock_status_id'] = $this->getIncomingStockStatusId($settings);
-            }
         } elseif ($hasIncoming) {
             $fields['status'] = 1;
             $fields['stock_status_id'] = $this->getIncomingStockStatusId($settings);
@@ -391,16 +286,9 @@ class MoyskladProduct extends \Opencart\System\Engine\Model {
             return 'skipped';
         }
 
-        $hasIncoming = $this->linkHasIncoming($link);
-        $incomingQuantity = $hasIncoming ? $this->getLinkIncomingQuantity($link) : 0.0;
-        $previousActualStock = isset($link['last_stock_quantity']) && is_numeric($link['last_stock_quantity'])
-            ? max(0.0, (float)$link['last_stock_quantity'])
-            : max(0.0, (float)$current->row['quantity'] - $incomingQuantity);
-        $actualStockQuantity = $previousActualStock + $addQuantity;
-        $siteQuantity = $this->calculateSiteQuantity($actualStockQuantity, $incomingQuantity, $settings);
-
+        $newQuantity = max(0, (int)$current->row['quantity']) + $addQuantity;
         $fields = $this->filterExistingColumns('product', [
-            'quantity' => (int)floor($siteQuantity),
+            'quantity' => $newQuantity,
             'status' => 1,
             'date_modified' => date('Y-m-d H:i:s')
         ]);
@@ -408,17 +296,16 @@ class MoyskladProduct extends \Opencart\System\Engine\Model {
         $this->db->query("UPDATE `" . DB_PREFIX . "product` SET " . $this->buildSqlSet($fields) . "
             WHERE `product_id` = '" . (int)$productId . "'");
 
+        $hasIncoming = $this->linkHasIncoming($link);
         $linkFields = [
             'article' => (string)($stockRow['article'] ?? ''),
             'sync_source' => $hasIncoming ? 'stock_incoming' : 'stock',
-            'incoming_quantity' => $hasIncoming ? $incomingQuantity : null,
+            'incoming_quantity' => $hasIncoming ? $this->getLinkIncomingQuantity($link) : null,
             'purchase_order_id' => $hasIncoming ? (string)($link['purchase_order_id'] ?? '') : null,
             'purchase_order_name' => $hasIncoming ? (string)($link['purchase_order_name'] ?? '') : null,
             'purchase_order_state_id' => $hasIncoming ? (string)($link['purchase_order_state_id'] ?? '') : null,
             'purchase_order_state_name' => $hasIncoming ? (string)($link['purchase_order_state_name'] ?? '') : null,
-            'purchase_order_store_id' => $hasIncoming ? (string)($link['purchase_order_store_id'] ?? '') : null,
-            'purchase_order_store_name' => $hasIncoming ? (string)($link['purchase_order_store_name'] ?? '') : null,
-            'last_stock_quantity' => $actualStockQuantity,
+            'last_stock_quantity' => $newQuantity,
             'last_seen_task_id' => $taskId,
             'last_seen_at' => date('Y-m-d H:i:s'),
             'last_synced_at' => date('Y-m-d H:i:s'),
@@ -451,8 +338,6 @@ class MoyskladProduct extends \Opencart\System\Engine\Model {
             'purchase_order_name' => $hasIncoming ? (string)($link['purchase_order_name'] ?? '') : null,
             'purchase_order_state_id' => $hasIncoming ? (string)($link['purchase_order_state_id'] ?? '') : null,
             'purchase_order_state_name' => $hasIncoming ? (string)($link['purchase_order_state_name'] ?? '') : null,
-            'purchase_order_store_id' => $hasIncoming ? (string)($link['purchase_order_store_id'] ?? '') : null,
-            'purchase_order_store_name' => $hasIncoming ? (string)($link['purchase_order_store_name'] ?? '') : null,
             'last_stock_quantity' => $stock,
             'last_seen_task_id' => $taskId,
             'last_seen_at' => date('Y-m-d H:i:s'),
@@ -474,8 +359,6 @@ class MoyskladProduct extends \Opencart\System\Engine\Model {
             'purchase_order_name' => null,
             'purchase_order_state_id' => null,
             'purchase_order_state_name' => null,
-            'purchase_order_store_id' => null,
-            'purchase_order_store_name' => null,
             'last_stock_quantity' => 0,
             'updated_at' => date('Y-m-d H:i:s'),
         ];
@@ -512,8 +395,7 @@ class MoyskladProduct extends \Opencart\System\Engine\Model {
             'status' => $status,
             // Для ожидаемых товаров по заказам поставщикам можно назначить
             // отдельный stock_status_id, например «Предзаказ» или «Ожидается».
-            // Сам товар при этом остается включенным, а quantity задается
-            // по настройке: только факт или факт + ожидаемая поставка.
+            // Сам товар при этом остается включенным, но quantity по умолчанию 0.
             'stock_status_id' => isset($product['stock_status_id']) && is_numeric($product['stock_status_id']) ? (int)$product['stock_status_id'] : $this->getOutOfStockStatusId(),
             'is_incoming' => !empty($product['is_incoming']),
             'incoming_quantity' => isset($product['incoming_quantity']) && is_numeric($product['incoming_quantity']) ? (float)$product['incoming_quantity'] : 0.0,
@@ -522,8 +404,6 @@ class MoyskladProduct extends \Opencart\System\Engine\Model {
             'purchase_order_name' => (string)($product['purchase_order_name'] ?? ''),
             'purchase_order_state_id' => (string)($product['purchase_order_state_id'] ?? ''),
             'purchase_order_state_name' => (string)($product['purchase_order_state_name'] ?? ''),
-            'purchase_order_store_id' => (string)($product['purchase_order_store_id'] ?? ''),
-            'purchase_order_store_name' => (string)($product['purchase_order_store_name'] ?? ''),
             'category_moysklad_id' => (string)($product['category_id'] ?? ''),
             'manufacturer_name' => trim((string)($product['manufacturer_name'] ?? '')),
             'weight' => isset($product['weight']) && is_numeric($product['weight']) ? (float)$product['weight'] : 0.0,
@@ -919,10 +799,6 @@ class MoyskladProduct extends \Opencart\System\Engine\Model {
         $quantity = $quantityKnown && isset($product['quantity']) && is_numeric($product['quantity']) ? (float)$product['quantity'] : null;
         $incomingQuantity = isset($product['incoming_quantity']) && is_numeric($product['incoming_quantity']) ? (float)$product['incoming_quantity'] : 0.0;
 
-        $actualStockQuantity = $isIncoming
-            ? (isset($product['actual_stock_quantity']) && is_numeric($product['actual_stock_quantity']) ? max(0.0, (float)$product['actual_stock_quantity']) : 0.0)
-            : $quantity;
-
         return [
             'moysklad_href' => (string)($product['href'] ?? ''),
             'external_code' => (string)($product['external_code'] ?? ''),
@@ -934,9 +810,7 @@ class MoyskladProduct extends \Opencart\System\Engine\Model {
             'purchase_order_name' => $isIncoming ? (string)($product['purchase_order_name'] ?? '') : null,
             'purchase_order_state_id' => $isIncoming ? (string)($product['purchase_order_state_id'] ?? '') : null,
             'purchase_order_state_name' => $isIncoming ? (string)($product['purchase_order_state_name'] ?? '') : null,
-            'purchase_order_store_id' => $isIncoming ? (string)($product['purchase_order_store_id'] ?? '') : null,
-            'purchase_order_store_name' => $isIncoming ? (string)($product['purchase_order_store_name'] ?? '') : null,
-            'last_stock_quantity' => $actualStockQuantity,
+            'last_stock_quantity' => $isIncoming ? null : $quantity,
         ];
     }
 
@@ -950,31 +824,6 @@ class MoyskladProduct extends \Opencart\System\Engine\Model {
             'status' => $quantity > 0 ? 1 : 0,
             'date_modified' => date('Y-m-d H:i:s')
         ]);
-
-        if (!$fields) {
-            return;
-        }
-
-        $this->db->query("UPDATE `" . DB_PREFIX . "product` SET " . $this->buildSqlSet($fields) . "
-            WHERE `product_id` = '" . (int)$productId . "'");
-    }
-
-    private function setProductIncomingQuantity(int $productId, int $quantity, int $stockStatusId): void {
-        if ($productId <= 0) {
-            return;
-        }
-
-        $fields = [
-            'quantity' => max(0, $quantity),
-            'status' => 1,
-            'date_modified' => date('Y-m-d H:i:s')
-        ];
-
-        if ($quantity <= 0) {
-            $fields['stock_status_id'] = $stockStatusId > 0 ? $stockStatusId : $this->getOutOfStockStatusId();
-        }
-
-        $fields = $this->filterExistingColumns('product', $fields);
 
         if (!$fields) {
             return;
@@ -1064,7 +913,7 @@ class MoyskladProduct extends \Opencart\System\Engine\Model {
         if ($search !== '') {
             $escaped = $this->db->escape($search);
             $like = "LIKE '%" . $escaped . "%'";
-            $where[] = "(pd.`name` " . $like . " OR l.`article` " . $like . " OR l.`purchase_order_name` " . $like . " OR l.`purchase_order_state_name` " . $like . " OR l.`purchase_order_store_name` " . $like . ")";
+            $where[] = "(pd.`name` " . $like . " OR l.`article` " . $like . " OR l.`purchase_order_name` " . $like . " OR l.`purchase_order_state_name` " . $like . ")";
         }
 
         $source = (string)($filter['source'] ?? '');
@@ -1081,9 +930,9 @@ class MoyskladProduct extends \Opencart\System\Engine\Model {
 
         $quantity = (string)($filter['quantity'] ?? '');
         if ($quantity === 'positive') {
-            $where[] = "COALESCE(l.`last_stock_quantity`, 0) > 0";
+            $where[] = "COALESCE(p.`quantity`, 0) > 0";
         } elseif ($quantity === 'zero') {
-            $where[] = "COALESCE(l.`last_stock_quantity`, 0) <= 0";
+            $where[] = "COALESCE(p.`quantity`, 0) <= 0";
         }
 
         $expected = (string)($filter['expected'] ?? '');
@@ -1104,12 +953,10 @@ class MoyskladProduct extends \Opencart\System\Engine\Model {
             'product' => "pd.`name`",
             'article' => "l.`article`",
             'source' => "CASE l.`sync_source` WHEN 'stock_incoming' THEN 1 WHEN 'stock' THEN 2 WHEN 'incoming' THEN 3 WHEN 'missing' THEN 4 ELSE 5 END",
-            'quantity' => "COALESCE(l.`last_stock_quantity`, 0)",
-            'site_quantity' => "COALESCE(p.`quantity`, 0)",
+            'quantity' => "COALESCE(p.`quantity`, 0)",
             'expected' => "COALESCE(l.`incoming_quantity`, 0)",
             'stock_status' => ($stockStatusJoin ? "ss.`name`" : "p.`stock_status_id`"),
             'purchase_order' => "l.`purchase_order_name`",
-            'purchase_order_store' => "l.`purchase_order_store_name`",
             'updated' => "l.`last_synced_at`",
             'id' => "l.`product_id`"
         ];
@@ -1125,7 +972,6 @@ class MoyskladProduct extends \Opencart\System\Engine\Model {
                 l.`incoming_quantity`,
                 l.`purchase_order_name`,
                 l.`purchase_order_state_name`,
-                l.`purchase_order_store_name`,
                 l.`last_stock_quantity`,
                 l.`last_synced_at`,
                 p.`quantity`,
@@ -1149,11 +995,7 @@ class MoyskladProduct extends \Opencart\System\Engine\Model {
                 'moysklad_id' => (string)$row['moysklad_id'],
                 'name' => (string)($row['product_name'] ?: ('#' . (int)$row['product_id'])),
                 'article' => (string)($row['article'] ?? ''),
-                // quantity в таблице модуля — это фактический остаток, а не
-                // стандартное p.quantity. p.quantity теперь может включать ожидаемые
-                // поставки, поэтому отдаем его отдельным полем site_quantity.
-                'quantity' => $row['last_stock_quantity'] !== null ? (float)$row['last_stock_quantity'] : 0.0,
-                'site_quantity' => isset($row['quantity']) ? (int)$row['quantity'] : null,
+                'quantity' => isset($row['quantity']) ? (int)$row['quantity'] : null,
                 'status' => isset($row['status']) ? (int)$row['status'] : null,
                 'stock_status_id' => isset($row['stock_status_id']) ? (int)$row['stock_status_id'] : null,
                 'stock_status_name' => (string)($row['stock_status_name'] ?? ''),
@@ -1161,7 +1003,6 @@ class MoyskladProduct extends \Opencart\System\Engine\Model {
                 'incoming_quantity' => $row['incoming_quantity'] !== null ? (float)$row['incoming_quantity'] : null,
                 'purchase_order_name' => (string)($row['purchase_order_name'] ?? ''),
                 'purchase_order_state_name' => (string)($row['purchase_order_state_name'] ?? ''),
-                'purchase_order_store_name' => (string)($row['purchase_order_store_name'] ?? ''),
                 'last_stock_quantity' => $row['last_stock_quantity'] !== null ? (float)$row['last_stock_quantity'] : null,
                 'last_synced_at' => (string)($row['last_synced_at'] ?? ''),
             ];
@@ -1205,17 +1046,17 @@ class MoyskladProduct extends \Opencart\System\Engine\Model {
     /**
      * Добавляет ожидаемое количество к уже существующему товару по ID МойСклад.
      * Используется, когда товар одновременно есть в остатках и в заказе поставщику
-     * под тем же самым ID: фактический остаток и ожидаемое количество
-     * храним раздельно, а стандартный quantity пересчитываем по настройке.
+     * под тем же самым ID: фактический quantity не трогаем, но в админке показываем
+     * дополнительное ожидаемое количество.
      */
-    public function attachIncomingToProductByMoyskladId(string $moyskladId, array $incomingProduct, int $taskId, array $settings = []): string {
+    public function attachIncomingToProductByMoyskladId(string $moyskladId, array $incomingProduct, int $taskId): string {
         $link = $this->getLinkByMoyskladId($moyskladId);
 
         if (!$link || empty($link['product_id'])) {
             return 'skipped';
         }
 
-        return $this->attachIncomingToProductId((int)$link['product_id'], $incomingProduct, $taskId, $settings);
+        return $this->attachIncomingToProductId((int)$link['product_id'], $incomingProduct, $taskId);
     }
 
     /**
@@ -1225,7 +1066,7 @@ class MoyskladProduct extends \Opencart\System\Engine\Model {
      * поставщику не создается. Вместо этого у складского товара появляется
      * incoming_quantity и источник «В наличии + заказ поставщику».
      */
-    public function attachIncomingToProductId(int $productId, array $incomingProduct, int $taskId, array $settings = []): string {
+    public function attachIncomingToProductId(int $productId, array $incomingProduct, int $taskId): string {
         if ($productId <= 0) {
             return 'skipped';
         }
@@ -1254,8 +1095,6 @@ class MoyskladProduct extends \Opencart\System\Engine\Model {
         $stateName = $this->appendUniqueListValue((string)($link['purchase_order_state_name'] ?? ''), (string)($incomingProduct['purchase_order_state_name'] ?? ''));
         $orderId = $this->appendUniqueListValue((string)($link['purchase_order_id'] ?? ''), (string)($incomingProduct['purchase_order_id'] ?? ''));
         $stateId = $this->appendUniqueListValue((string)($link['purchase_order_state_id'] ?? ''), (string)($incomingProduct['purchase_order_state_id'] ?? ''));
-        $storeId = $this->appendUniqueListValue((string)($link['purchase_order_store_id'] ?? ''), (string)($incomingProduct['purchase_order_store_id'] ?? ''));
-        $storeName = $this->appendUniqueListValue((string)($link['purchase_order_store_name'] ?? ''), (string)($incomingProduct['purchase_order_store_name'] ?? ''));
 
         $fields = [
             'sync_source' => 'stock_incoming',
@@ -1264,8 +1103,6 @@ class MoyskladProduct extends \Opencart\System\Engine\Model {
             'purchase_order_name' => $orderName,
             'purchase_order_state_id' => $stateId,
             'purchase_order_state_name' => $stateName,
-            'purchase_order_store_id' => $storeId,
-            'purchase_order_store_name' => $storeName,
             'last_seen_task_id' => $taskId,
             'last_seen_at' => date('Y-m-d H:i:s'),
             'last_synced_at' => date('Y-m-d H:i:s'),
@@ -1290,25 +1127,12 @@ class MoyskladProduct extends \Opencart\System\Engine\Model {
         $this->db->query("UPDATE `" . DB_PREFIX . "moysklad_product_link` SET " . $this->buildSqlSet($fields) . "
             WHERE `product_id` = '" . (int)$productId . "'");
 
-        // Товар, который есть в заказе поставщику, должен оставаться включенным.
-        // В активном режиме quantity сайта = фактический остаток + ожидаемое
-        // количество, но факт и ожидание продолжаем хранить раздельно в таблице
-        // связей для менеджера.
-        $actualStockQuantity = isset($link['last_stock_quantity']) && is_numeric($link['last_stock_quantity'])
-            ? max(0.0, (float)$link['last_stock_quantity'])
-            : 0.0;
-        $siteQuantity = $this->calculateSiteQuantity($actualStockQuantity, $newIncoming, $settings);
-        $productFields = [
-            'quantity' => (int)floor($siteQuantity),
+        // Товар, который уже есть на складе, должен оставаться включенным. Quantity
+        // не меняем: это фактический остаток по выбранным складам.
+        $productFields = $this->filterExistingColumns('product', [
             'status' => 1,
             'date_modified' => date('Y-m-d H:i:s')
-        ];
-
-        if ($actualStockQuantity <= 0) {
-            $productFields['stock_status_id'] = $this->getIncomingStockStatusId($settings);
-        }
-
-        $productFields = $this->filterExistingColumns('product', $productFields);
+        ]);
 
         if ($productFields) {
             $this->db->query("UPDATE `" . DB_PREFIX . "product` SET " . $this->buildSqlSet($productFields) . "
@@ -1380,21 +1204,6 @@ class MoyskladProduct extends \Opencart\System\Engine\Model {
         $stockStatusId = (int)($settings['module_moysklad_sync_incoming_stock_status_id'] ?? 0);
 
         return $stockStatusId > 0 ? $stockStatusId : $this->getOutOfStockStatusId();
-    }
-
-    private function includeIncomingInSiteQuantity(array $settings): bool {
-        return !empty($settings['module_moysklad_sync_include_incoming_in_site_quantity']);
-    }
-
-    private function calculateSiteQuantity(float $actualStockQuantity, float $incomingQuantity, array $settings): float {
-        $actualStockQuantity = max(0.0, $actualStockQuantity);
-        $incomingQuantity = max(0.0, $incomingQuantity);
-
-        if ($this->includeIncomingInSiteQuantity($settings)) {
-            return $actualStockQuantity + $incomingQuantity;
-        }
-
-        return $actualStockQuantity;
     }
 
     private function getLinkByMoyskladId(string $moyskladId): ?array {

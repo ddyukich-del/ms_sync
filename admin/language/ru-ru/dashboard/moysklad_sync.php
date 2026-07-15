@@ -1,4 +1,8 @@
 <?php
+
+/**
+ * @author d_dyuk
+ */
 $_['heading_title'] = 'МойСклад';
 $_['moysklad_sync_heading_title'] = 'МойСклад';
 $_['text_total_products'] = 'Товаров в интеграции';
@@ -13,4 +17,3 @@ $_['button_open_sync'] = 'Синхронизация';
 $_['button_open_settings'] = 'Настройки';
 
 $_['button_open_diagnostics'] = 'Диагностика';
-$_['button_open_autosync'] = 'Автосинхронизация';

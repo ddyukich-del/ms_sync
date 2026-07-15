@@ -1,6 +1,10 @@
 <?php
 namespace Opencart\Admin\Controller\Extension\MoyskladSync\Module;
 
+/**
+ * @author d_dyuk
+ */
+
 use MoyskladSync\ApiException;
 use MoyskladSync\HttpClient;
 use MoyskladSync\MoyskladClient;
@@ -13,8 +17,7 @@ use MoyskladSync\TaskRunner;
 
 class MoyskladSync extends \Opencart\System\Engine\Controller {
     private const SETTING_CODE = 'module_moysklad_sync';
-    private const VERSION = '1.1.5';
-    private const CRON_ROUTE = 'extension/moysklad_sync/cron/moysklad_sync';
+    private const VERSION = '1.0.1';
 
     private array $error = [];
 
@@ -108,9 +111,6 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
                 break;
             case 'stop_task':
                 $this->stopTask();
-                break;
-            case 'refresh_cron_token':
-                $this->refreshCronToken();
                 break;
             default:
                 $this->load->language('extension/moysklad_sync/module/moysklad_sync');
@@ -287,7 +287,6 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
         try {
             $lockedTask = $this->model_extension_moysklad_sync_module_moysklad_task->getTask($taskId);
             $settings = $this->getCurrentSettings();
-            $settings = $this->applyTaskSettingsSnapshot($settings, is_array($lockedTask) ? $lockedTask : []);
             $client = $this->createMoyskladClientFromSettings($settings);
             $categoryService = new CategorySyncService(
                 $client,
@@ -424,11 +423,9 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
             $this->language->get('column_sync_source'),
             $this->language->get('column_quantity'),
             $this->language->get('column_expected_quantity'),
-            $this->language->get('column_site_quantity'),
             $this->language->get('column_stock_status'),
             $this->language->get('column_purchase_order'),
             $this->language->get('column_purchase_order_state'),
-            $this->language->get('column_purchase_order_store'),
             $this->language->get('column_updated')
         ], ';');
 
@@ -440,11 +437,9 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
                 (string)($row['sync_source_title'] ?? ''),
                 (string)($row['quantity'] ?? ''),
                 (string)($row['expected_quantity'] ?? $row['incoming_quantity'] ?? ''),
-                (string)($row['site_quantity'] ?? ''),
                 (string)($row['stock_status_name'] ?? ''),
                 (string)($row['purchase_order_name'] ?? ''),
                 (string)($row['purchase_order_state_name'] ?? ''),
-                (string)($row['purchase_order_store_name'] ?? ''),
                 (string)($row['last_synced_at'] ?? '')
             ], ';');
         }
@@ -569,7 +564,6 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
             // Если архив обновили поверх предыдущей версии, install() мог не вызваться.
             // Поэтому мягко регистрируем dashboard-виджет при открытии страницы.
             $this->installDashboardWidget();
-            $this->ensureAutosyncSettings();
         } catch (\Throwable $e) {
             $this->log->write('Moysklad Sync schema migration error: ' . $e->getMessage());
         }
@@ -592,7 +586,6 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
         // вмешиваться в левое меню через OCMOD: главная админки сама загружает
         // расширения типа dashboard через таблицу extension и настройки dashboard_*.
         $this->installDashboardWidget(true);
-        $this->ensureAutosyncSettings();
     }
 
     public function uninstall(): void {
@@ -877,7 +870,6 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
         $data['get_task_status'] = $this->url->link('extension/moysklad_sync/module/moysklad_sync', $base_query . '&ajax_action=get_task_status');
         $data['stop_task'] = $this->url->link('extension/moysklad_sync/module/moysklad_sync', $base_query . '&ajax_action=stop_task');
         $data['download_api_debug_log'] = $this->url->link('extension/moysklad_sync/module/moysklad_sync', $base_query . '&ajax_action=download_api_debug_log');
-        $data['refresh_cron_token'] = $this->url->link('extension/moysklad_sync/module/moysklad_sync', $base_query . '&ajax_action=refresh_cron_token');
         $data['back'] = $this->url->link('marketplace/extension', 'user_token=' . $this->session->data['user_token'] . '&type=module');
 
         $defaults = $this->getDefaultSettings();
@@ -890,7 +882,7 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
             }
 
             $value = $this->config->get($key);
-            $data[$key] = ($value !== null && $value !== '') ? $value : $default;
+            $data[$key] = $value !== null ? $value : $default;
         }
 
         $data['module_moysklad_sync_warehouse_ids'] = $this->normaliseStringArray($data['module_moysklad_sync_warehouse_ids'] ?? []);
@@ -898,28 +890,11 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
             $data['module_moysklad_sync_warehouse_ids'] = [(string)$data['module_moysklad_sync_warehouse_id']];
         }
         $data['module_moysklad_sync_warehouse_names'] = $this->normaliseStringArray($data['module_moysklad_sync_warehouse_names'] ?? []);
-        $data['module_moysklad_sync_incoming_product_match_mode'] = 'by_moysklad_id';
-        $data['module_moysklad_sync_incoming_quantity_mode'] = 'zero';
-        $data['cron_url'] = $this->getCronUrl((string)($data['module_moysklad_sync_cron_token'] ?? ''));
-
-        $data['autosync_interval_unit_options'] = [
-            'seconds' => $this->language->get('text_interval_seconds'),
-            'minutes' => $this->language->get('text_interval_minutes'),
-            'hours' => $this->language->get('text_interval_hours'),
-            'days' => $this->language->get('text_interval_days'),
-            'months' => $this->language->get('text_interval_months')
-        ];
 
         $data['action_options'] = [
             'none' => $this->language->get('text_action_none'),
             'disable' => $this->language->get('text_action_disable'),
             'delete' => $this->language->get('text_action_delete')
-        ];
-
-        $data['category_status_mode_options'] = [
-            'preserve_existing' => $this->language->get('text_category_status_preserve_existing'),
-            'disable_archived' => $this->language->get('text_category_status_disable_archived'),
-            'sync' => $this->language->get('text_category_status_sync')
         ];
 
         $data['log_level_options'] = [
@@ -938,7 +913,6 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
         ];
 
         $data['incoming_product_match_mode_options'] = [
-            'by_moysklad_id' => $this->language->get('text_incoming_match_by_moysklad_id'),
             'separate' => $this->language->get('text_incoming_match_separate'),
             'merge_by_name' => $this->language->get('text_incoming_match_merge_by_name')
         ];
@@ -986,13 +960,6 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
             $this->loadTaskModel();
 
             $settings = $this->getCurrentSettings();
-
-            // Флажок на вкладке "Синхронизация" работает как настройка конкретного запуска.
-            // Его можно переключить и сразу нажать "Импорт товаров" без отдельного сохранения формы.
-            if ($type === 'import') {
-                $settings['module_moysklad_sync_import_categories_enabled'] = !empty($this->request->post['module_moysklad_sync_import_categories_enabled']) ? 1 : 0;
-            }
-
             $limit = $this->getLimitForTaskType($type, $settings);
 
             $task = $this->model_extension_moysklad_sync_module_moysklad_task->createTask($type, $limit, [
@@ -1059,7 +1026,7 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
 
         foreach ($defaults as $key => $default) {
             $value = $this->config->get($key);
-            $settings[$key] = ($value !== null && $value !== '') ? $value : $default;
+            $settings[$key] = $value !== null ? $value : $default;
         }
 
         // Совместимость со старыми установками: раньше выбирался один склад и
@@ -1076,29 +1043,6 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
 
     private function getSafeSettingsSnapshot(array $settings): array {
         unset($settings['module_moysklad_sync_api_token']);
-
-        return $settings;
-    }
-
-    private function applyTaskSettingsSnapshot(array $settings, array $task): array {
-        $payload = json_decode((string)($task['payload'] ?? ''), true);
-
-        if (!is_array($payload) || empty($payload['settings_snapshot']) || !is_array($payload['settings_snapshot'])) {
-            return $settings;
-        }
-
-        // Токен намеренно не хранится в snapshot, но остальные настройки запуска
-        // должны оставаться стабильными до завершения задачи. Иначе администратор
-        // может переключить флажок категорий в середине импорта и изменить маршрут.
-        foreach ($payload['settings_snapshot'] as $key => $value) {
-            if ($key === 'module_moysklad_sync_api_token') {
-                continue;
-            }
-
-            if (array_key_exists($key, $settings)) {
-                $settings[$key] = $value;
-            }
-        }
 
         return $settings;
     }
@@ -1219,8 +1163,7 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
                 'product_id' => (int)($row['product_id'] ?? 0),
                 'name' => (string)($row['name'] ?? ''),
                 'article' => (string)($row['article'] ?? ''),
-                'quantity' => $row['quantity'] === null ? '' : (string)(float)$row['quantity'],
-                'site_quantity' => $row['site_quantity'] === null ? '' : (string)(int)$row['site_quantity'],
+                'quantity' => $row['quantity'] === null ? '' : (string)(int)$row['quantity'],
                 'status' => (int)($row['status'] ?? 0),
                 'stock_status_name' => (string)($row['stock_status_name'] ?? ''),
                 'sync_source' => $source,
@@ -1230,7 +1173,6 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
                 'expected_quantity' => $row['incoming_quantity'] === null ? '' : (string)(float)$row['incoming_quantity'],
                 'purchase_order_name' => (string)($row['purchase_order_name'] ?? ''),
                 'purchase_order_state_name' => (string)($row['purchase_order_state_name'] ?? ''),
-                'purchase_order_store_name' => (string)($row['purchase_order_store_name'] ?? ''),
                 'last_stock_quantity' => $row['last_stock_quantity'] === null ? '' : (string)(float)$row['last_stock_quantity'],
                 'last_synced_at' => (string)($row['last_synced_at'] ?? ''),
             ];
@@ -1308,7 +1250,6 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
         $settings['module_moysklad_sync_warehouse_name'] = (string)($settings['module_moysklad_sync_warehouse_names'][0] ?? trim((string)($post['module_moysklad_sync_warehouse_name'] ?? '')));
         $settings['module_moysklad_sync_price_type_id'] = trim((string)($post['module_moysklad_sync_price_type_id'] ?? ''));
         $settings['module_moysklad_sync_price_type_name'] = trim((string)($post['module_moysklad_sync_price_type_name'] ?? ''));
-        $settings['module_moysklad_sync_import_categories_enabled'] = !empty($post['module_moysklad_sync_import_categories_enabled']) ? 1 : 0;
         $settings['module_moysklad_sync_purchase_orders_enabled'] = !empty($post['module_moysklad_sync_purchase_orders_enabled']) ? 1 : 0;
         $settings['module_moysklad_sync_purchase_order_state_ids'] = $this->normaliseStringArray($post['module_moysklad_sync_purchase_order_state_ids'] ?? []);
         $settings['module_moysklad_sync_incoming_quantity_mode'] = $this->normaliseEnum(
@@ -1317,10 +1258,11 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
             'zero'
         );
         $settings['module_moysklad_sync_incoming_stock_status_id'] = max(0, (int)($post['module_moysklad_sync_incoming_stock_status_id'] ?? 0));
-        $settings['module_moysklad_sync_include_incoming_in_site_quantity'] = !empty($post['module_moysklad_sync_include_incoming_in_site_quantity']) ? 1 : 0;
-        // Старые режимы separate/merge_by_name оставлены в коде как legacy, но в
-        // активной логике заказы поставщикам сопоставляются только по ID МойСклад.
-        $settings['module_moysklad_sync_incoming_product_match_mode'] = 'by_moysklad_id';
+        $settings['module_moysklad_sync_incoming_product_match_mode'] = $this->normaliseEnum(
+            $post['module_moysklad_sync_incoming_product_match_mode'] ?? 'separate',
+            ['separate', 'merge_by_name'],
+            'separate'
+        );
 
         $settings['module_moysklad_sync_missing_product_action'] = $this->normaliseEnum(
             $post['module_moysklad_sync_missing_product_action'] ?? 'disable',
@@ -1332,12 +1274,6 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
             $post['module_moysklad_sync_missing_category_action'] ?? 'disable',
             ['none', 'disable', 'delete'],
             'disable'
-        );
-
-        $settings['module_moysklad_sync_category_status_mode'] = $this->normaliseEnum(
-            $post['module_moysklad_sync_category_status_mode'] ?? 'preserve_existing',
-            ['preserve_existing', 'disable_archived', 'sync'],
-            'preserve_existing'
         );
 
         $settings['module_moysklad_sync_zero_stock_action'] = $this->normaliseEnum(
@@ -1360,24 +1296,6 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
 
         $settings['module_moysklad_sync_clear_empty_description'] = !empty($post['module_moysklad_sync_clear_empty_description']) ? 1 : 0;
         $settings['module_moysklad_sync_api_debug_enabled'] = !empty($post['module_moysklad_sync_api_debug_enabled']) ? 1 : 0;
-
-        $currentCronToken = trim((string)$this->config->get('module_moysklad_sync_cron_token'));
-        $postedCronToken = trim((string)($post['module_moysklad_sync_cron_token'] ?? ''));
-        $settings['module_moysklad_sync_cron_token'] = $postedCronToken !== '' ? $postedCronToken : ($currentCronToken !== '' ? $currentCronToken : $this->generateCronToken());
-        $settings['module_moysklad_sync_auto_sync_enabled'] = !empty($post['module_moysklad_sync_auto_sync_enabled']) ? 1 : 0;
-        foreach (['stock', 'import', 'images'] as $autoType) {
-            $settings['module_moysklad_sync_auto_' . $autoType . '_enabled'] = !empty($post['module_moysklad_sync_auto_' . $autoType . '_enabled']) ? 1 : 0;
-            $settings['module_moysklad_sync_auto_' . $autoType . '_interval_value'] = max(1, (int)($post['module_moysklad_sync_auto_' . $autoType . '_interval_value'] ?? 1));
-            $settings['module_moysklad_sync_auto_' . $autoType . '_interval_unit'] = $this->normaliseEnum(
-                $post['module_moysklad_sync_auto_' . $autoType . '_interval_unit'] ?? 'hours',
-                ['seconds', 'minutes', 'hours', 'days', 'months'],
-                'hours'
-            );
-            $settings['module_moysklad_sync_auto_' . $autoType . '_last_run_at'] = trim((string)($post['module_moysklad_sync_auto_' . $autoType . '_last_run_at'] ?? $this->config->get('module_moysklad_sync_auto_' . $autoType . '_last_run_at')));
-            $settings['module_moysklad_sync_auto_' . $autoType . '_next_run_at'] = trim((string)($post['module_moysklad_sync_auto_' . $autoType . '_next_run_at'] ?? $this->config->get('module_moysklad_sync_auto_' . $autoType . '_next_run_at')));
-        }
-        $settings['module_moysklad_sync_auto_max_steps_per_run'] = max(1, min(20, (int)($post['module_moysklad_sync_auto_max_steps_per_run'] ?? 3)));
-        $settings['module_moysklad_sync_auto_max_runtime_seconds'] = max(10, min(120, (int)($post['module_moysklad_sync_auto_max_runtime_seconds'] ?? 25)));
 
         $settings['module_moysklad_sync_category_batch_size'] = max(1, (int)($post['module_moysklad_sync_category_batch_size'] ?? 30));
         $settings['module_moysklad_sync_product_batch_size'] = max(1, (int)($post['module_moysklad_sync_product_batch_size'] ?? 20));
@@ -1412,20 +1330,6 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
 
         if ($settings['module_moysklad_sync_max_image_bytes'] < 1048576 || $settings['module_moysklad_sync_max_image_bytes'] > 31457280) {
             $this->error['max_image_bytes'] = $this->language->get('error_max_image_bytes');
-        }
-
-        foreach (['stock', 'import', 'images'] as $autoType) {
-            $value = (int)($settings['module_moysklad_sync_auto_' . $autoType . '_interval_value'] ?? 0);
-            $unit = (string)($settings['module_moysklad_sync_auto_' . $autoType . '_interval_unit'] ?? '');
-            if ($value < 1 || !in_array($unit, ['seconds', 'minutes', 'hours', 'days', 'months'], true)) {
-                $this->error['auto_' . $autoType] = $this->language->get('error_auto_interval');
-            }
-            if ($unit === 'seconds' && $value < 30) {
-                $this->error['auto_' . $autoType] = $this->language->get('error_auto_interval_min_seconds');
-            }
-            if ($unit === 'months' && $value > 12) {
-                $this->error['auto_' . $autoType] = $this->language->get('error_auto_interval_max_months');
-            }
         }
 
         return !$this->error;
@@ -1471,16 +1375,13 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
             'module_moysklad_sync_warehouse_names' => [],
             'module_moysklad_sync_price_type_id' => '',
             'module_moysklad_sync_price_type_name' => '',
-            'module_moysklad_sync_import_categories_enabled' => 0,
             'module_moysklad_sync_purchase_orders_enabled' => 0,
             'module_moysklad_sync_purchase_order_state_ids' => [],
             'module_moysklad_sync_incoming_quantity_mode' => 'zero',
             'module_moysklad_sync_incoming_stock_status_id' => (int)$this->config->get('config_stock_status_id'),
-            'module_moysklad_sync_include_incoming_in_site_quantity' => 1,
-            'module_moysklad_sync_incoming_product_match_mode' => 'by_moysklad_id',
+            'module_moysklad_sync_incoming_product_match_mode' => 'separate',
             'module_moysklad_sync_missing_product_action' => 'disable',
             'module_moysklad_sync_missing_category_action' => 'disable',
-            'module_moysklad_sync_category_status_mode' => 'preserve_existing',
             'module_moysklad_sync_zero_stock_action' => 'disable',
             'module_moysklad_sync_seo_mode' => 'new_only',
             'module_moysklad_sync_clear_empty_description' => 1,
@@ -1491,106 +1392,8 @@ class MoyskladSync extends \Opencart\System\Engine\Controller {
             'module_moysklad_sync_max_images_per_product' => 5,
             'module_moysklad_sync_max_image_bytes' => 10485760,
             'module_moysklad_sync_log_level' => 'warning',
-            'module_moysklad_sync_api_debug_enabled' => 0,
-            'module_moysklad_sync_cron_token' => $this->generateCronToken(),
-            'module_moysklad_sync_auto_sync_enabled' => 0,
-            'module_moysklad_sync_auto_stock_enabled' => 1,
-            'module_moysklad_sync_auto_stock_interval_value' => 5,
-            'module_moysklad_sync_auto_stock_interval_unit' => 'minutes',
-            'module_moysklad_sync_auto_stock_last_run_at' => '',
-            'module_moysklad_sync_auto_stock_next_run_at' => '',
-            'module_moysklad_sync_auto_import_enabled' => 1,
-            'module_moysklad_sync_auto_import_interval_value' => 1,
-            'module_moysklad_sync_auto_import_interval_unit' => 'hours',
-            'module_moysklad_sync_auto_import_last_run_at' => '',
-            'module_moysklad_sync_auto_import_next_run_at' => '',
-            'module_moysklad_sync_auto_images_enabled' => 0,
-            'module_moysklad_sync_auto_images_interval_value' => 1,
-            'module_moysklad_sync_auto_images_interval_unit' => 'days',
-            'module_moysklad_sync_auto_images_last_run_at' => '',
-            'module_moysklad_sync_auto_images_next_run_at' => '',
-            'module_moysklad_sync_auto_max_steps_per_run' => 3,
-            'module_moysklad_sync_auto_max_runtime_seconds' => 25
+            'module_moysklad_sync_api_debug_enabled' => 0
         ];
-    }
-
-    public function refreshCronToken(): void {
-        $this->load->language('extension/moysklad_sync/module/moysklad_sync');
-
-        if (!$this->user->hasPermission('modify', 'extension/moysklad_sync/module/moysklad_sync')) {
-            $this->sendJson(['error' => $this->language->get('error_permission')]);
-            return;
-        }
-
-        $token = $this->generateCronToken();
-        $this->setSettingValue(self::SETTING_CODE, 'module_moysklad_sync_cron_token', $token);
-        $this->config->set('module_moysklad_sync_cron_token', $token);
-
-        $this->sendJson([
-            'success' => $this->language->get('text_cron_token_refreshed'),
-            'cron_token' => $token,
-            'cron_url' => $this->getCronUrl($token)
-        ]);
-    }
-
-    private function ensureAutosyncSettings(): void {
-        $defaults = $this->getDefaultSettings();
-        $keys = [
-            'module_moysklad_sync_cron_token',
-            'module_moysklad_sync_auto_sync_enabled',
-            'module_moysklad_sync_auto_stock_enabled',
-            'module_moysklad_sync_auto_stock_interval_value',
-            'module_moysklad_sync_auto_stock_interval_unit',
-            'module_moysklad_sync_auto_stock_last_run_at',
-            'module_moysklad_sync_auto_stock_next_run_at',
-            'module_moysklad_sync_auto_import_enabled',
-            'module_moysklad_sync_auto_import_interval_value',
-            'module_moysklad_sync_auto_import_interval_unit',
-            'module_moysklad_sync_auto_import_last_run_at',
-            'module_moysklad_sync_auto_import_next_run_at',
-            'module_moysklad_sync_auto_images_enabled',
-            'module_moysklad_sync_auto_images_interval_value',
-            'module_moysklad_sync_auto_images_interval_unit',
-            'module_moysklad_sync_auto_images_last_run_at',
-            'module_moysklad_sync_auto_images_next_run_at',
-            'module_moysklad_sync_auto_max_steps_per_run',
-            'module_moysklad_sync_auto_max_runtime_seconds'
-        ];
-
-        foreach ($keys as $key) {
-            $query = $this->db->query("SELECT `setting_id` FROM `" . DB_PREFIX . "setting` WHERE `store_id` = '0' AND `key` = '" . $this->db->escape($key) . "' LIMIT 1");
-            if ($query->num_rows) {
-                continue;
-            }
-
-            $value = $defaults[$key] ?? '';
-            $storedValue = is_array($value) ? json_encode($value) : (string)$value;
-            $this->db->query("INSERT INTO `" . DB_PREFIX . "setting` SET `store_id` = '0', `code` = '" . self::SETTING_CODE . "', `key` = '" . $this->db->escape($key) . "', `value` = '" . $this->db->escape($storedValue) . "', `serialized` = '" . (is_array($value) ? '1' : '0') . "'");
-            $this->config->set($key, $value);
-        }
-    }
-
-    private function setSettingValue(string $code, string $key, string $value): void {
-        $query = $this->db->query("SELECT `setting_id` FROM `" . DB_PREFIX . "setting` WHERE `store_id` = '0' AND `key` = '" . $this->db->escape($key) . "' LIMIT 1");
-
-        if ($query->num_rows) {
-            $this->db->query("UPDATE `" . DB_PREFIX . "setting` SET `code` = '" . $this->db->escape($code) . "', `value` = '" . $this->db->escape($value) . "', `serialized` = '0' WHERE `setting_id` = '" . (int)$query->row['setting_id'] . "'");
-        } else {
-            $this->db->query("INSERT INTO `" . DB_PREFIX . "setting` SET `store_id` = '0', `code` = '" . $this->db->escape($code) . "', `key` = '" . $this->db->escape($key) . "', `value` = '" . $this->db->escape($value) . "', `serialized` = '0'");
-        }
-    }
-
-    private function generateCronToken(): string {
-        try {
-            return bin2hex(random_bytes(24));
-        } catch (\Throwable $e) {
-            return sha1(uniqid('moysklad_sync_cron_', true) . microtime(true));
-        }
-    }
-
-    private function getCronUrl(string $token): string {
-        $base = defined('HTTP_CATALOG') && HTTP_CATALOG ? HTTP_CATALOG : HTTP_SERVER;
-        return rtrim($base, '/') . '/index.php?route=' . self::CRON_ROUTE . '&token=' . rawurlencode($token);
     }
 
     private function createMoyskladClientFromRequest(): MoyskladClient {

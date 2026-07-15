@@ -2,11 +2,16 @@
 namespace MoyskladSync;
 
 /**
+ * @author d_dyuk
+ */
+
+/**
  * Сервис учета ожидаемых поступлений по заказам поставщикам.
  *
- * Позиции заказа поставщику всегда ссылаются на существующую номенклатуру
- * МойСклад через assortment.meta.href. Поэтому активная логика ищет товар только
- * по ID МойСклад, а ожидаемое количество может добавляться к quantity сайта.
+ * Фактический остаток и заказ поставщику — разные вещи. Фактический остаток
+ * берется из отчета выбранного склада, а заказ поставщику используется только
+ * для того, чтобы оставить товар включенным как «ожидаемый», если физически
+ * на складе его пока нет.
  */
 class PurchaseOrderSyncService {
     private MoyskladClient $client;
@@ -45,30 +50,8 @@ class PurchaseOrderSyncService {
             'error_items' => 0,
         ];
 
-        if ($offset === 0) {
-            if (method_exists($this->productModel, 'resetIncomingQuantitiesBeforePurchaseOrderSync')) {
-                try {
-                    $cleared = (int)$this->productModel->resetIncomingQuantitiesBeforePurchaseOrderSync($taskId, $settings);
-                    $this->taskModel->addLog($taskId, 'info', 'purchaseorder', null, 'Перед пересчетом заказов поставщикам очищены старые ожидаемые количества: записей=' . $cleared . '.');
-                } catch (\Throwable $e) {
-                    $this->taskModel->addError($taskId, 'purchaseorder', null, 'PURCHASE_ORDER_INCOMING_RESET_ERROR', $e->getMessage(), []);
-                    throw $e;
-                }
-            } else {
-                $this->taskModel->addLog($taskId, 'warning', 'purchaseorder', null, 'Метод очистки старых ожидаемых количеств недоступен. Обновите модель товаров модуля.');
-            }
-        }
-
         if (empty($settings['module_moysklad_sync_purchase_orders_enabled'])) {
-            $this->taskModel->addLog($taskId, 'info', 'purchaseorder', null, 'Учет заказов поставщикам выключен. Старые ожидаемые количества очищены, переходим к обработке отсутствующих товаров.');
-            $this->taskModel->moveToStep($taskId, 'process_missing_products', (int)($settings['module_moysklad_sync_product_batch_size'] ?? 20));
-            return $this->taskModel->getTask($taskId) ?: [];
-        }
-
-        $selectedWarehouses = $this->normalizeSelectedWarehouses($settings);
-
-        if (!$selectedWarehouses['values']) {
-            $this->taskModel->addLog($taskId, 'warning', 'purchaseorder', null, 'Учет заказов поставщикам включен, но склады модуля не выбраны. Ожидаемые товары не импортируются.');
+            $this->taskModel->addLog($taskId, 'info', 'purchaseorder', null, 'Учет заказов поставщикам выключен. Переходим к обработке отсутствующих товаров.');
             $this->taskModel->moveToStep($taskId, 'process_missing_products', (int)($settings['module_moysklad_sync_product_batch_size'] ?? 20));
             return $this->taskModel->getTask($taskId) ?: [];
         }
@@ -84,15 +67,26 @@ class PurchaseOrderSyncService {
         $page = $this->client->getPurchaseOrdersPage($limit, $offset);
         $orders = $page['rows'];
         $total = (int)$page['total'];
+        $incomingQuantityMode = (string)($settings['module_moysklad_sync_incoming_quantity_mode'] ?? 'zero');
         $incomingStockStatusId = (int)($settings['module_moysklad_sync_incoming_stock_status_id'] ?? 0);
-        $includeIncomingInSiteQuantity = !empty($settings['module_moysklad_sync_include_incoming_in_site_quantity']);
+        $matchMode = (string)($settings['module_moysklad_sync_incoming_product_match_mode'] ?? 'separate');
+
+        // В режиме объединения по наименованию ожидаемое поступление всегда
+        // хранится отдельно от фактического остатка. Это принципиально: менеджер
+        // должен видеть, сколько можно отгрузить сейчас, а сколько еще едет.
+        // Поэтому настройка "ставить quantity из заказа поставщику" применяется
+        // только к режиму отдельных ожидаемых товаров. При объединении quantity
+        // сайта остается фактическим остатком выбранных складов.
+        if ($matchMode === 'merge_by_name') {
+            $incomingQuantityMode = 'zero';
+        }
 
         $this->taskModel->addLog(
             $taskId,
             'info',
             'purchaseorder',
             null,
-            'Проверяем заказы поставщикам: offset=' . $offset . ', limit=' . $limit . ', rows=' . count($orders) . ', total=' . $total . ', выбранные статусы=' . implode(', ', $selectedStates['values']) . ', выбранные склады=' . implode(', ', $selectedWarehouses['values']) . ', сопоставление=по ID МойСклад, ожидаемое в quantity сайта=' . ($includeIncomingInSiteQuantity ? 'да' : 'нет') . '.'
+            'Проверяем заказы поставщикам: offset=' . $offset . ', limit=' . $limit . ', rows=' . count($orders) . ', total=' . $total . ', выбранные статусы=' . implode(', ', $selectedStates['values']) . ', режим товаров=' . $matchMode . ', режим количества=' . $incomingQuantityMode . '.'
         );
 
         $matchedOrders = 0;
@@ -116,18 +110,12 @@ class PurchaseOrderSyncService {
                 continue;
             }
 
-            if (!$this->orderMatchesSelectedWarehouses($order, $selectedWarehouses)) {
-                $stats['skipped_items']++;
-                $this->taskModel->addLog($taskId, 'info', 'purchaseorder', $orderId, 'Заказ поставщику пропущен по складу: №' . $orderName . ', store_id=' . (string)($order['store_id'] ?? '') . ', store_name=' . (string)($order['store_name'] ?? '') . '.');
-                continue;
-            }
-
             $matchedOrders++;
 
             try {
                 $positions = $this->client->getPurchaseOrderPositions($orderId);
                 $positionsLoaded += count($positions);
-                $this->taskModel->addLog($taskId, 'info', 'purchaseorder', $orderId, 'Заказ поставщику учтен: №' . $orderName . ', склад=' . ((string)($order['store_name'] ?? '') !== '' ? (string)$order['store_name'] : (string)($order['store_id'] ?? '')) . '. Позиции: ' . count($positions) . '.');
+                $this->taskModel->addLog($taskId, 'info', 'purchaseorder', $orderId, 'Заказ поставщику подходит по статусу: №' . $orderName . '. Позиции: ' . count($positions) . '.');
             } catch (\Throwable $e) {
                 $stats['error_items']++;
                 $this->taskModel->addError($taskId, 'purchaseorder', $orderId, 'PURCHASE_ORDER_POSITIONS_ERROR', $e->getMessage(), $order);
@@ -160,13 +148,6 @@ class PurchaseOrderSyncService {
                     if ($incomingQuantity <= 0) {
                         $stats['processed_items']++;
                         $stats['skipped_items']++;
-                        $this->taskModel->addLog(
-                            $taskId,
-                            'info',
-                            'purchaseorder_product',
-                            $moyskladProductId !== '' ? $moyskladProductId : $orderId,
-                            'Позиция заказа поставщику пропущена: к поступлению 0. Заказано=' . (string)($position['ordered_quantity'] ?? '') . ', принято=' . (string)($position['shipped_quantity'] ?? '') . ', в пути=' . (string)($position['in_transit_quantity'] ?? '') . ', товар=' . (string)($position['name'] ?? '') . '.'
-                        );
                         continue;
                     }
 
@@ -179,17 +160,14 @@ class PurchaseOrderSyncService {
                         'purchase_order_name' => $orderName,
                         'purchase_order_state_id' => (string)($order['state_id'] ?? ''),
                         'purchase_order_state_name' => (string)($order['state_name'] ?? ''),
-                        'purchase_order_store_id' => (string)($order['store_id'] ?? ''),
-                        'purchase_order_store_name' => (string)($order['store_name'] ?? ''),
                     ];
 
                     // Если товар уже пришел из фактических остатков под тем же ID,
-                    // не создаем дубль. Добавляем ожидаемое количество именно к этой
-                    // карточке. В активном режиме product.quantity станет:
-                    // фактический остаток + ожидаемое количество.
+                    // не создаем дубль и не меняем реальный quantity. Просто
+                    // добавляем к этой карточке ожидаемое количество из заказа.
                     if (method_exists($this->productModel, 'wasSeenInTask') && $this->productModel->wasSeenInTask($moyskladProductId, $taskId)) {
                         $result = method_exists($this->productModel, 'attachIncomingToProductByMoyskladId')
-                            ? $this->productModel->attachIncomingToProductByMoyskladId($moyskladProductId, $incomingMeta, $taskId, $settings)
+                            ? $this->productModel->attachIncomingToProductByMoyskladId($moyskladProductId, $incomingMeta, $taskId)
                             : 'skipped';
 
                         $stats['processed_items']++;
@@ -198,8 +176,7 @@ class PurchaseOrderSyncService {
                     }
 
                     $product = $this->client->getProductById($moyskladProductId);
-                    $product['actual_stock_quantity'] = 0;
-                    $product['quantity'] = $includeIncomingInSiteQuantity ? $incomingQuantity : 0;
+                    $product['quantity'] = $incomingQuantityMode === 'expected' ? $incomingQuantity : 0;
                     $product['quantity_known'] = true;
                     $product['is_incoming'] = true;
                     $product['incoming_quantity'] = $incomingQuantity;
@@ -207,8 +184,6 @@ class PurchaseOrderSyncService {
                     $product['purchase_order_name'] = $orderName;
                     $product['purchase_order_state_id'] = (string)($order['state_id'] ?? '');
                     $product['purchase_order_state_name'] = (string)($order['state_name'] ?? '');
-                    $product['purchase_order_store_id'] = (string)($order['store_id'] ?? '');
-                    $product['purchase_order_store_name'] = (string)($order['store_name'] ?? '');
 
                     // Товар ожидается к поступлению, поэтому он должен быть включен,
                     // даже если физический остаток 0. stock_status_id показывает
@@ -219,10 +194,25 @@ class PurchaseOrderSyncService {
                         $product['stock_status_id'] = $incomingStockStatusId;
                     }
 
-                    // Старый режим объединения по наименованию оставлен в кодовой базе
-                    // как legacy, но в активном сценарии больше не применяется. Заказы
-                    // поставщикам сопоставляются только по стабильному ID номенклатуры
-                    // МойСклад из assortment.meta.href.
+                    // Настраиваемый режим: если заказ поставщику содержит позицию с
+                    // тем же наименованием, что и товар в фактических остатках,
+                    // можно не создавать отдельную карточку, а добавить ожидаемое
+                    // количество к уже существующему товару. Сравнение идет по
+                    // нормализованному названию и только с товарами, встреченными
+                    // в текущей задаче как складские.
+                    if ($matchMode === 'merge_by_name' && method_exists($this->productModel, 'findMergeTargetProductIdByName') && method_exists($this->productModel, 'attachIncomingToProductId')) {
+                        $targetProductId = $this->productModel->findMergeTargetProductIdByName((string)($product['name'] ?? ''), $taskId);
+
+                        if ($targetProductId > 0) {
+                            $product['merge_target_name'] = (string)($product['name'] ?? '');
+                            $result = $this->productModel->attachIncomingToProductId($targetProductId, $product, $taskId);
+
+                            $stats['processed_items']++;
+                            $this->accumulateResult($stats, $result);
+                            $this->taskModel->addLog($taskId, 'info', 'purchaseorder_product', $moyskladProductId, 'Позиция заказа поставщику объединена с товаром в наличии по наименованию: ' . (string)($product['name'] ?? '') . '.');
+                            continue;
+                        }
+                    }
 
                     $this->ensureCategoryForProduct($product, $taskId, $settings, $moyskladProductId);
 
@@ -281,58 +271,6 @@ class PurchaseOrderSyncService {
                 'path_name' => (string)($product['path_name'] ?? ''),
             ]);
         }
-    }
-
-
-    private function normalizeSelectedWarehouses(array $settings): array {
-        $raw = $settings['module_moysklad_sync_warehouse_ids'] ?? [];
-
-        if (is_string($raw)) {
-            $decoded = json_decode($raw, true);
-            $raw = is_array($decoded) ? $decoded : [$raw];
-        }
-
-        if (!is_array($raw)) {
-            $raw = [];
-        }
-
-        if (!$raw && !empty($settings['module_moysklad_sync_warehouse_id'])) {
-            $raw[] = (string)$settings['module_moysklad_sync_warehouse_id'];
-        }
-
-        $values = [];
-        $lookup = [];
-
-        foreach ($raw as $warehouseId) {
-            $warehouseId = trim((string)$warehouseId);
-
-            if ($warehouseId === '') {
-                continue;
-            }
-
-            $values[$warehouseId] = $warehouseId;
-            $lookup[$this->normalizeComparable($warehouseId)] = true;
-            $lookup[$this->normalizeComparable('https://api.moysklad.ru/api/remap/1.2/entity/store/' . $warehouseId)] = true;
-        }
-
-        return ['values' => array_values($values), 'lookup' => $lookup];
-    }
-
-    private function orderMatchesSelectedWarehouses(array $order, array $selectedWarehouses): bool {
-        $candidates = [
-            (string)($order['store_id'] ?? ''),
-            (string)($order['store_href'] ?? ''),
-        ];
-
-        foreach ($candidates as $candidate) {
-            $key = $this->normalizeComparable($candidate);
-
-            if ($key !== '' && !empty($selectedWarehouses['lookup'][$key])) {
-                return true;
-            }
-        }
-
-        return false;
     }
 
     private function normalizeSelectedStates(mixed $value): array {

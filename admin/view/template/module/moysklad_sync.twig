@@ -1,3 +1,4 @@
+{# @author d_dyuk #}
 {{ header }}{{ column_left }}
 <div id="content">
   <style id="moysklad-sync-products-style">
@@ -40,7 +41,6 @@
         <ul class="nav nav-tabs" id="moysklad-tabs" role="tablist">
           <li class="nav-item" role="presentation"><button class="nav-link active" id="tab-settings" data-bs-toggle="tab" data-bs-target="#pane-settings" type="button" role="tab">{{ text_tab_settings }}</button></li>
           <li class="nav-item" role="presentation"><button class="nav-link" id="tab-sync" data-bs-toggle="tab" data-bs-target="#pane-sync" type="button" role="tab">{{ text_tab_sync }}</button></li>
-          <li class="nav-item" role="presentation"><button class="nav-link" id="tab-autosync" data-bs-toggle="tab" data-bs-target="#pane-autosync" type="button" role="tab">{{ text_tab_autosync }}</button></li>
           <li class="nav-item" role="presentation"><button class="nav-link" id="tab-products" data-bs-toggle="tab" data-bs-target="#pane-products" type="button" role="tab">{{ text_tab_products }}</button></li>
           <li class="nav-item" role="presentation"><button class="nav-link" id="tab-logs" data-bs-toggle="tab" data-bs-target="#pane-logs" type="button" role="tab">{{ text_tab_logs }}</button></li>
           <li class="nav-item" role="presentation"><button class="nav-link" id="tab-diagnostics" data-bs-toggle="tab" data-bs-target="#pane-diagnostics" type="button" role="tab">{{ text_tab_diagnostics }}</button></li>
@@ -128,21 +128,9 @@
                 </div>
 
                 <div class="row mb-3">
-                  <label class="col-sm-3 col-form-label" for="input-include-incoming-site-quantity">{{ entry_include_incoming_in_site_quantity }}</label>
-                  <div class="col-sm-9">
-                    <div class="form-check form-switch form-switch-lg">
-                      <input type="hidden" name="module_moysklad_sync_include_incoming_in_site_quantity" value="0"/>
-                      <input type="checkbox" name="module_moysklad_sync_include_incoming_in_site_quantity" value="1" id="input-include-incoming-site-quantity" class="form-check-input"{% if module_moysklad_sync_include_incoming_in_site_quantity %} checked{% endif %}/>
-                    </div>
-                    <div class="form-text">{{ help_include_incoming_in_site_quantity }}</div>
-                  </div>
-                </div>
-
-                <div class="row mb-3">
                   <label class="col-sm-3 col-form-label" for="input-incoming-quantity-mode">{{ entry_incoming_quantity_mode }}</label>
                   <div class="col-sm-9">
-                    <input type="hidden" name="module_moysklad_sync_incoming_quantity_mode" value="zero"/>
-                    <select id="input-incoming-quantity-mode" class="form-select" disabled>
+                    <select name="module_moysklad_sync_incoming_quantity_mode" id="input-incoming-quantity-mode" class="form-select">
                       {% for value, title in incoming_quantity_mode_options %}
                         <option value="{{ value }}"{% if value == module_moysklad_sync_incoming_quantity_mode %} selected{% endif %}>{{ title }}</option>
                       {% endfor %}
@@ -154,8 +142,7 @@
                 <div class="row mb-3">
                   <label class="col-sm-3 col-form-label" for="input-incoming-product-match-mode">{{ entry_incoming_product_match_mode }}</label>
                   <div class="col-sm-9">
-                    <input type="hidden" name="module_moysklad_sync_incoming_product_match_mode" value="by_moysklad_id"/>
-                    <select id="input-incoming-product-match-mode" class="form-select" disabled>
+                    <select name="module_moysklad_sync_incoming_product_match_mode" id="input-incoming-product-match-mode" class="form-select">
                       {% for value, title in incoming_product_match_mode_options %}
                         <option value="{{ value }}"{% if value == module_moysklad_sync_incoming_product_match_mode %} selected{% endif %}>{{ title }}</option>
                       {% endfor %}
@@ -196,18 +183,6 @@
                         <option value="{{ value }}"{% if value == module_moysklad_sync_missing_category_action %} selected{% endif %}>{{ title }}</option>
                       {% endfor %}
                     </select>
-                  </div>
-                </div>
-
-                <div class="row mb-3">
-                  <label class="col-sm-3 col-form-label" for="input-category-status-mode">{{ entry_category_status_mode }}</label>
-                  <div class="col-sm-9">
-                    <select name="module_moysklad_sync_category_status_mode" id="input-category-status-mode" class="form-select">
-                      {% for value, title in category_status_mode_options %}
-                        <option value="{{ value }}"{% if value == module_moysklad_sync_category_status_mode %} selected{% endif %}>{{ title }}</option>
-                      {% endfor %}
-                    </select>
-                    <div class="form-text">{{ help_category_status_mode }}</div>
                   </div>
                 </div>
 
@@ -317,17 +292,6 @@
           <div class="tab-pane fade" id="pane-sync" role="tabpanel">
             <div class="alert alert-info"><i class="fa-solid fa-circle-info"></i> {{ text_stage3_notice }}</div>
 
-            <div class="card border-info mb-3">
-              <div class="card-body">
-                <div class="form-check form-switch form-switch-lg">
-                  <input type="hidden" name="module_moysklad_sync_import_categories_enabled" value="0" form="form-module"/>
-                  <input type="checkbox" name="module_moysklad_sync_import_categories_enabled" value="1" id="input-import-categories-enabled" class="form-check-input" form="form-module"{% if module_moysklad_sync_import_categories_enabled %} checked{% endif %}/>
-                  <label class="form-check-label fw-semibold" for="input-import-categories-enabled">{{ entry_import_categories_enabled }}</label>
-                </div>
-                <div class="form-text">{{ help_import_categories_enabled }}</div>
-              </div>
-            </div>
-
             <div class="d-flex flex-wrap gap-2 mb-3">
               <button type="button" class="btn btn-primary" id="button-start-import"><i class="fa-solid fa-download"></i> {{ button_import }}</button>
               <button type="button" class="btn btn-warning" id="button-start-stock"><i class="fa-solid fa-boxes-stacked"></i> {{ button_stock }}</button>
@@ -341,137 +305,6 @@
               <div class="card-header"><i class="fa-solid fa-list-check"></i> {{ text_task_panel_title }}</div>
               <div class="card-body" id="task-panel">
                 <div class="alert alert-secondary mb-0">{{ text_task_panel_empty }}</div>
-              </div>
-            </div>
-          </div>
-
-          <div class="tab-pane fade" id="pane-autosync" role="tabpanel">
-            <div class="alert alert-info"><i class="fa-solid fa-clock-rotate-left"></i> {{ text_autosync_help }}</div>
-
-            <div class="row mb-3">
-              <label class="col-sm-3 col-form-label" for="input-auto-sync-enabled">{{ entry_auto_sync_enabled }}</label>
-              <div class="col-sm-9">
-                <div class="form-check form-switch form-switch-lg">
-                  <input type="hidden" name="module_moysklad_sync_auto_sync_enabled" value="0" form="form-module"/>
-                  <input type="checkbox" name="module_moysklad_sync_auto_sync_enabled" value="1" id="input-auto-sync-enabled" class="form-check-input" form="form-module"{% if module_moysklad_sync_auto_sync_enabled %} checked{% endif %}/>
-                </div>
-                <div class="form-text">{{ help_auto_sync_enabled }}</div>
-              </div>
-            </div>
-
-            <div class="row mb-3">
-              <label class="col-sm-3 col-form-label" for="input-cron-url">{{ entry_cron_url }}</label>
-              <div class="col-sm-9">
-                <div class="input-group">
-                  <input type="hidden" name="module_moysklad_sync_cron_token" id="input-cron-token" value="{{ module_moysklad_sync_cron_token }}" form="form-module"/>
-                  <input type="text" id="input-cron-url" value="{{ cron_url }}" class="form-control" readonly/>
-                  <button type="button" class="btn btn-outline-secondary" id="button-refresh-cron-token"><i class="fa-solid fa-key"></i> {{ button_refresh_cron_token }}</button>
-                </div>
-                <div class="form-text">{{ help_cron_url }}</div>
-              </div>
-            </div>
-
-            <div class="card mb-3">
-              <div class="card-header"><i class="fa-solid fa-boxes-stacked"></i> {{ text_autosync_stock_title }}</div>
-              <div class="card-body">
-                <div class="row g-3 align-items-end">
-                  <div class="col-md-3">
-                    <div class="form-check form-switch form-switch-lg">
-                      <input type="hidden" name="module_moysklad_sync_auto_stock_enabled" value="0" form="form-module"/>
-                      <input type="checkbox" name="module_moysklad_sync_auto_stock_enabled" value="1" id="input-auto-stock-enabled" class="form-check-input" form="form-module"{% if module_moysklad_sync_auto_stock_enabled %} checked{% endif %}/>
-                      <label class="form-check-label" for="input-auto-stock-enabled">{{ entry_auto_task_enabled }}</label>
-                    </div>
-                  </div>
-                  <div class="col-md-2">
-                    <label class="form-label" for="input-auto-stock-interval-value">{{ entry_auto_interval_value }}</label>
-                    <input type="number" min="1" name="module_moysklad_sync_auto_stock_interval_value" id="input-auto-stock-interval-value" value="{{ module_moysklad_sync_auto_stock_interval_value }}" class="form-control" form="form-module"/>
-                  </div>
-                  <div class="col-md-3">
-                    <label class="form-label" for="input-auto-stock-interval-unit">{{ entry_auto_interval_unit }}</label>
-                    <select name="module_moysklad_sync_auto_stock_interval_unit" id="input-auto-stock-interval-unit" class="form-select" form="form-module">
-                      {% for value, title in autosync_interval_unit_options %}<option value="{{ value }}"{% if value == module_moysklad_sync_auto_stock_interval_unit %} selected{% endif %}>{{ title }}</option>{% endfor %}
-                    </select>
-                  </div>
-                  <div class="col-md-4 small text-muted">
-                    {{ text_auto_last_run }}: {{ module_moysklad_sync_auto_stock_last_run_at ?: '—' }}<br/>
-                    {{ text_auto_next_run }}: {{ module_moysklad_sync_auto_stock_next_run_at ?: '—' }}
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div class="card mb-3">
-              <div class="card-header"><i class="fa-solid fa-download"></i> {{ text_autosync_import_title }}</div>
-              <div class="card-body">
-                <div class="alert alert-warning py-2"><i class="fa-solid fa-triangle-exclamation"></i> {{ text_autosync_categories_manual }}</div>
-                <div class="row g-3 align-items-end">
-                  <div class="col-md-3">
-                    <div class="form-check form-switch form-switch-lg">
-                      <input type="hidden" name="module_moysklad_sync_auto_import_enabled" value="0" form="form-module"/>
-                      <input type="checkbox" name="module_moysklad_sync_auto_import_enabled" value="1" id="input-auto-import-enabled" class="form-check-input" form="form-module"{% if module_moysklad_sync_auto_import_enabled %} checked{% endif %}/>
-                      <label class="form-check-label" for="input-auto-import-enabled">{{ entry_auto_task_enabled }}</label>
-                    </div>
-                  </div>
-                  <div class="col-md-2">
-                    <label class="form-label" for="input-auto-import-interval-value">{{ entry_auto_interval_value }}</label>
-                    <input type="number" min="1" name="module_moysklad_sync_auto_import_interval_value" id="input-auto-import-interval-value" value="{{ module_moysklad_sync_auto_import_interval_value }}" class="form-control" form="form-module"/>
-                  </div>
-                  <div class="col-md-3">
-                    <label class="form-label" for="input-auto-import-interval-unit">{{ entry_auto_interval_unit }}</label>
-                    <select name="module_moysklad_sync_auto_import_interval_unit" id="input-auto-import-interval-unit" class="form-select" form="form-module">
-                      {% for value, title in autosync_interval_unit_options %}<option value="{{ value }}"{% if value == module_moysklad_sync_auto_import_interval_unit %} selected{% endif %}>{{ title }}</option>{% endfor %}
-                    </select>
-                  </div>
-                  <div class="col-md-4 small text-muted">
-                    {{ text_auto_last_run }}: {{ module_moysklad_sync_auto_import_last_run_at ?: '—' }}<br/>
-                    {{ text_auto_next_run }}: {{ module_moysklad_sync_auto_import_next_run_at ?: '—' }}
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div class="card mb-3">
-              <div class="card-header"><i class="fa-solid fa-image"></i> {{ text_autosync_images_title }}</div>
-              <div class="card-body">
-                <div class="row g-3 align-items-end">
-                  <div class="col-md-3">
-                    <div class="form-check form-switch form-switch-lg">
-                      <input type="hidden" name="module_moysklad_sync_auto_images_enabled" value="0" form="form-module"/>
-                      <input type="checkbox" name="module_moysklad_sync_auto_images_enabled" value="1" id="input-auto-images-enabled" class="form-check-input" form="form-module"{% if module_moysklad_sync_auto_images_enabled %} checked{% endif %}/>
-                      <label class="form-check-label" for="input-auto-images-enabled">{{ entry_auto_task_enabled }}</label>
-                    </div>
-                  </div>
-                  <div class="col-md-2">
-                    <label class="form-label" for="input-auto-images-interval-value">{{ entry_auto_interval_value }}</label>
-                    <input type="number" min="1" name="module_moysklad_sync_auto_images_interval_value" id="input-auto-images-interval-value" value="{{ module_moysklad_sync_auto_images_interval_value }}" class="form-control" form="form-module"/>
-                  </div>
-                  <div class="col-md-3">
-                    <label class="form-label" for="input-auto-images-interval-unit">{{ entry_auto_interval_unit }}</label>
-                    <select name="module_moysklad_sync_auto_images_interval_unit" id="input-auto-images-interval-unit" class="form-select" form="form-module">
-                      {% for value, title in autosync_interval_unit_options %}<option value="{{ value }}"{% if value == module_moysklad_sync_auto_images_interval_unit %} selected{% endif %}>{{ title }}</option>{% endfor %}
-                    </select>
-                  </div>
-                  <div class="col-md-4 small text-muted">
-                    {{ text_auto_last_run }}: {{ module_moysklad_sync_auto_images_last_run_at ?: '—' }}<br/>
-                    {{ text_auto_next_run }}: {{ module_moysklad_sync_auto_images_next_run_at ?: '—' }}
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div class="row mb-3">
-              <label class="col-sm-3 col-form-label" for="input-auto-max-steps">{{ entry_auto_max_steps_per_run }}</label>
-              <div class="col-sm-9">
-                <input type="number" min="1" max="20" name="module_moysklad_sync_auto_max_steps_per_run" id="input-auto-max-steps" value="{{ module_moysklad_sync_auto_max_steps_per_run }}" class="form-control" form="form-module"/>
-                <div class="form-text">{{ help_auto_max_steps_per_run }}</div>
-              </div>
-            </div>
-
-            <div class="row mb-3">
-              <label class="col-sm-3 col-form-label" for="input-auto-max-runtime">{{ entry_auto_max_runtime_seconds }}</label>
-              <div class="col-sm-9">
-                <input type="number" min="10" max="120" name="module_moysklad_sync_auto_max_runtime_seconds" id="input-auto-max-runtime" value="{{ module_moysklad_sync_auto_max_runtime_seconds }}" class="form-control" form="form-module"/>
-                <div class="form-text">{{ help_auto_max_runtime_seconds }}</div>
               </div>
             </div>
           </div>
@@ -551,7 +384,6 @@
                       <option value="article">{{ text_sort_by_article }}</option>
                       <option value="source">{{ text_sort_by_source }}</option>
                       <option value="quantity">{{ text_sort_by_quantity }}</option>
-                      <option value="site_quantity">{{ text_sort_by_site_quantity }}</option>
                       <option value="expected">{{ text_sort_by_expected }}</option>
                       <option value="stock_status">{{ text_sort_by_stock_status }}</option>
                       <option value="purchase_order">{{ text_sort_by_purchase_order }}</option>
@@ -644,9 +476,6 @@
   const refreshDiagnosticsButton = document.getElementById('button-refresh-diagnostics');
   const clearApiDebugButton = document.getElementById('button-clear-api-debug');
   const diagnosticsPanel = document.getElementById('diagnostics-panel');
-  const refreshCronTokenButton = document.getElementById('button-refresh-cron-token');
-  const cronTokenInput = document.getElementById('input-cron-token');
-  const cronUrlInput = document.getElementById('input-cron-url');
   let taskLoopRunning = false;
 
   // Важно: AJAX-URL собираем на стороне браузера из текущего URL страницы.
@@ -725,16 +554,10 @@
   }
 
   async function post(url) {
-    const formData = new FormData(form);
-    const importCategoriesCheckbox = document.getElementById('input-import-categories-enabled');
-    if (importCategoriesCheckbox && !formData.has('module_moysklad_sync_import_categories_enabled')) {
-      formData.append('module_moysklad_sync_import_categories_enabled', importCategoriesCheckbox.checked ? '1' : '0');
-    }
-
     const response = await fetch(url, {
       method: 'POST',
       credentials: 'same-origin',
-      body: formData
+      body: new FormData(form)
     });
 
     // Не вызываем response.json() напрямую. Если сервер вернул HTML
@@ -1064,10 +887,8 @@
       + '<th>' + sortButton('source', '{{ column_sync_source|e('js') }}') + '</th>'
       + '<th>' + sortButton('quantity', '{{ column_quantity|e('js') }}') + '</th>'
       + '<th>' + sortButton('expected', '{{ column_expected_quantity|e('js') }}') + '</th>'
-      + '<th>' + sortButton('site_quantity', '{{ column_site_quantity|e('js') }}') + '</th>'
       + '<th>' + sortButton('stock_status', '{{ column_stock_status|e('js') }}') + '</th>'
       + '<th>' + sortButton('purchase_order', '{{ column_purchase_order|e('js') }}') + '</th>'
-      + '<th>' + sortButton('purchase_order_store', '{{ column_purchase_order_store|e('js') }}') + '</th>'
       + '<th>' + sortButton('updated', '{{ column_updated|e('js') }}') + '</th>'
       + '</tr></thead><tbody>';
 
@@ -1077,7 +898,6 @@
       const orderInfo = row.purchase_order_name
         ? escapeHtml(row.purchase_order_name) + (row.purchase_order_state_name ? '<div class="small text-muted">' + escapeHtml(row.purchase_order_state_name) + '</div>' : '')
         : '—';
-      const orderStoreInfo = row.purchase_order_store_name ? escapeHtml(row.purchase_order_store_name) : '—';
 
       html += '<tr>'
         + '<td class="moysklad-product-name"><strong>' + escapeHtml(row.name || '') + '</strong><div class="moysklad-muted-small">ID: ' + escapeHtml(row.product_id || '') + '</div>' + productState + '</td>'
@@ -1085,10 +905,8 @@
         + '<td><span class="badge text-bg-' + escapeHtml(row.sync_source_badge || 'secondary') + '">' + escapeHtml(row.sync_source_title || '') + '</span></td>'
         + '<td class="moysklad-number">' + escapeHtml(row.quantity || '0') + '</td>'
         + '<td class="moysklad-number">' + escapeHtml(expectedQuantity) + '</td>'
-        + '<td class="moysklad-number fw-bold">' + escapeHtml(row.site_quantity || '0') + '</td>'
         + '<td>' + escapeHtml(row.stock_status_name || '') + '</td>'
         + '<td>' + orderInfo + '</td>'
-        + '<td>' + orderStoreInfo + '</td>'
         + '<td>' + escapeHtml(row.last_synced_at || '') + '</td>'
         + '</tr>';
     });
@@ -1128,29 +946,6 @@
     });
   }
 
-
-  async function refreshCronToken() {
-    setLoading(refreshCronTokenButton, true);
-
-    try {
-      const json = await post(ajaxUrl('refresh_cron_token'));
-      if (json.error) {
-        showAlert('danger', json.error);
-        return;
-      }
-      if (cronTokenInput) {
-        cronTokenInput.value = json.cron_token || '';
-      }
-      if (cronUrlInput) {
-        cronUrlInput.value = json.cron_url || '';
-      }
-      showAlert('success', json.success || '{{ text_cron_token_refreshed|e('js') }}');
-    } catch (error) {
-      showAlert('danger', error.message);
-    } finally {
-      setLoading(refreshCronTokenButton, false);
-    }
-  }
 
   async function refreshDiagnostics() {
     setLoading(refreshDiagnosticsButton, true);
@@ -1317,9 +1112,6 @@
   if (clearApiDebugButton) {
     clearApiDebugButton.addEventListener('click', clearApiDebugLog);
   }
-  if (refreshCronTokenButton) {
-    refreshCronTokenButton.addEventListener('click', refreshCronToken);
-  }
   if (refreshProductsButton) {
     refreshProductsButton.addEventListener('click', refreshProductStatuses);
   }
@@ -1392,11 +1184,6 @@
     const syncTab = document.getElementById('tab-sync');
     if (syncTab && typeof bootstrap !== 'undefined') {
       bootstrap.Tab.getOrCreateInstance(syncTab).show();
-    }
-  } else if (initialTab === 'autosync') {
-    const autosyncTab = document.getElementById('tab-autosync');
-    if (autosyncTab && typeof bootstrap !== 'undefined') {
-      bootstrap.Tab.getOrCreateInstance(autosyncTab).show();
     }
   } else if (initialTab === 'diagnostics') {
     const diagnosticsTab = document.getElementById('tab-diagnostics');

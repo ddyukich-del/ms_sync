@@ -2,6 +2,10 @@
 namespace MoyskladSync;
 
 /**
+ * @author d_dyuk
+ */
+
+/**
  * Низкоуровневый HTTP-клиент для МойСклад.
  *
  * Задача этого класса — только сеть: собрать URL, добавить заголовки,
@@ -102,7 +106,7 @@ class HttpClient {
         $headers = [
             'Accept: image/*,*/*;q=0.8',
             'Authorization: Bearer ' . $this->token,
-            'User-Agent: ocstore-moysklad-sync/1.1.5'
+            'User-Agent: ocstore-moysklad-sync/1.0.1'
         ];
 
         curl_setopt_array($ch, [
@@ -185,7 +189,7 @@ class HttpClient {
             'Accept: application/json;charset=utf-8',
             'Content-Type: application/json;charset=utf-8',
             'Authorization: Bearer ' . $this->token,
-            'User-Agent: ocstore-moysklad-sync/1.1.5'
+            'User-Agent: ocstore-moysklad-sync/1.0.1'
         ];
 
         $ch = curl_init($url);

@@ -1,6 +1,10 @@
 <?php
 namespace Opencart\Admin\Model\Extension\MoyskladSync\Module;
 
+/**
+ * @author d_dyuk
+ */
+
 class MoyskladSync extends \Opencart\System\Engine\Model {
     public function install(): void {
         // install() вызывается установщиком OpenCart/ocStore.
@@ -53,9 +57,7 @@ class MoyskladSync extends \Opencart\System\Engine\Model {
         $this->addColumnIfMissing($table, 'purchase_order_name', "`purchase_order_name` VARCHAR(128) DEFAULT NULL AFTER `purchase_order_id`");
         $this->addColumnIfMissing($table, 'purchase_order_state_id', "`purchase_order_state_id` VARCHAR(128) DEFAULT NULL AFTER `purchase_order_name`");
         $this->addColumnIfMissing($table, 'purchase_order_state_name', "`purchase_order_state_name` VARCHAR(128) DEFAULT NULL AFTER `purchase_order_state_id`");
-        $this->addColumnIfMissing($table, 'purchase_order_store_id', "`purchase_order_store_id` VARCHAR(64) DEFAULT NULL AFTER `purchase_order_state_name`");
-        $this->addColumnIfMissing($table, 'purchase_order_store_name', "`purchase_order_store_name` VARCHAR(128) DEFAULT NULL AFTER `purchase_order_store_id`");
-        $this->addColumnIfMissing($table, 'last_stock_quantity', "`last_stock_quantity` DECIMAL(15,4) DEFAULT NULL AFTER `purchase_order_store_name`");
+        $this->addColumnIfMissing($table, 'last_stock_quantity', "`last_stock_quantity` DECIMAL(15,4) DEFAULT NULL AFTER `purchase_order_state_name`");
         $this->addColumnIfMissing($table, 'last_hash', "`last_hash` CHAR(64) DEFAULT NULL AFTER `last_stock_quantity`");
         $this->addColumnIfMissing($table, 'last_seen_task_id', "`last_seen_task_id` INT UNSIGNED DEFAULT NULL AFTER `last_hash`");
         $this->addColumnIfMissing($table, 'last_seen_at', "`last_seen_at` DATETIME DEFAULT NULL AFTER `last_seen_task_id`");
@@ -70,7 +72,6 @@ class MoyskladSync extends \Opencart\System\Engine\Model {
         $this->addIndexIfMissing($table, 'idx_name_key', "KEY `idx_name_key` (`name_key`)");
         $this->addIndexIfMissing($table, 'idx_sync_source', "KEY `idx_sync_source` (`sync_source`)");
         $this->addIndexIfMissing($table, 'idx_purchase_order_state', "KEY `idx_purchase_order_state` (`purchase_order_state_id`)");
-        $this->addIndexIfMissing($table, 'idx_purchase_order_store', "KEY `idx_purchase_order_store` (`purchase_order_store_id`)");
     }
 
     private function migrateCategoryLinkTable(): void {
@@ -191,8 +192,6 @@ class MoyskladSync extends \Opencart\System\Engine\Model {
             `purchase_order_name` VARCHAR(128) DEFAULT NULL,
             `purchase_order_state_id` VARCHAR(128) DEFAULT NULL,
             `purchase_order_state_name` VARCHAR(128) DEFAULT NULL,
-            `purchase_order_store_id` VARCHAR(64) DEFAULT NULL,
-            `purchase_order_store_name` VARCHAR(128) DEFAULT NULL,
             `last_stock_quantity` DECIMAL(15,4) DEFAULT NULL,
             `last_hash` CHAR(64) DEFAULT NULL,
             `last_seen_task_id` INT UNSIGNED DEFAULT NULL,
@@ -208,7 +207,6 @@ class MoyskladSync extends \Opencart\System\Engine\Model {
             KEY `idx_name_key` (`name_key`),
             KEY `idx_sync_source` (`sync_source`),
             KEY `idx_purchase_order_state` (`purchase_order_state_id`),
-            KEY `idx_purchase_order_store` (`purchase_order_store_id`),
             KEY `idx_last_seen_task` (`last_seen_task_id`),
             KEY `idx_last_seen_at` (`last_seen_at`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");

@@ -2,6 +2,10 @@
 namespace MoyskladSync;
 
 /**
+ * @author d_dyuk
+ */
+
+/**
  * Клиент верхнего уровня для API МойСклад.
  *
  * В этом классе есть знание о конкретных endpoint'ах МойСклад, но нет знания
@@ -364,11 +368,10 @@ class MoyskladClient {
         $result = $this->http->request('GET', '/entity/purchaseorder', [
             'limit' => $limit,
             'offset' => $offset,
-            // Разворачиваем статус и склад. Статус нужен для выбранных статусов
-            // поставки, склад — для защиты от смешивания факта одного склада с
-            // ожидаемыми поступлениями на другой склад. Если аккаунт вернет только
-            // meta, normalizePurchaseOrderRow все равно достанет ID из href.
-            'expand' => 'state,store'
+            // Разворачиваем статус, чтобы фильтровать документы по ID статуса,
+            // выбранному в настройках. Если конкретный аккаунт вернет только meta,
+            // normalizePurchaseOrderRow все равно достанет ID из href.
+            'expand' => 'state'
         ]);
 
         $rows = $this->normalizeRows($result, function (array $row): array {
@@ -624,8 +627,6 @@ class MoyskladClient {
     private function normalizePurchaseOrderRow(array $row): array {
         $state = is_array($row['state'] ?? null) ? $row['state'] : [];
         $stateMeta = is_array($state['meta'] ?? null) ? $state['meta'] : [];
-        $store = is_array($row['store'] ?? null) ? $row['store'] : [];
-        $storeMeta = is_array($store['meta'] ?? null) ? $store['meta'] : [];
         $meta = is_array($row['meta'] ?? null) ? $row['meta'] : [];
 
         return [
@@ -637,9 +638,6 @@ class MoyskladClient {
             'state_id' => $this->extractIdFromMeta($stateMeta) ?: $this->extractId($state),
             'state_name' => (string)($state['name'] ?? ''),
             'state_href' => (string)($stateMeta['href'] ?? ''),
-            'store_id' => $this->extractIdFromMeta($storeMeta) ?: $this->extractId($store),
-            'store_name' => (string)($store['name'] ?? ''),
-            'store_href' => (string)($storeMeta['href'] ?? ''),
         ];
     }
 
@@ -666,19 +664,6 @@ class MoyskladClient {
             $positionId = $productId !== '' ? $productId : hash('sha256', json_encode($row, JSON_UNESCAPED_UNICODE));
         }
 
-        $orderedQuantity = isset($row['quantity']) && is_numeric($row['quantity']) ? (float)$row['quantity'] : 0.0;
-        $shippedQuantity = isset($row['shipped']) && is_numeric($row['shipped']) ? (float)$row['shipped'] : 0.0;
-        $inTransitQuantity = isset($row['inTransit']) && is_numeric($row['inTransit']) ? (float)$row['inTransit'] : null;
-
-        // Для витрины "ожидается от поставщика" — это не весь объем строки
-        // заказа, а только еще не принятая часть. В МойСклад у позиции заказа
-        // поставщику API может вернуть quantity=заказано, shipped=уже принято,
-        // inTransit=еще в пути. Если взять quantity целиком, уже оприходованные
-        // строки снова попадут как предзаказ и могут держать товар с фактом 0.
-        $remainingQuantity = $inTransitQuantity !== null
-            ? $inTransitQuantity
-            : max(0.0, $orderedQuantity - $shippedQuantity);
-
         return [
             'id' => $positionId,
             'product_id' => $productId,
@@ -686,11 +671,7 @@ class MoyskladClient {
             'assortment_id' => $assortmentId,
             'type' => $assortmentType,
             'name' => (string)($assortment['name'] ?? $row['name'] ?? ''),
-            // В активной бизнес-логике quantity позиции = остаток к поступлению.
-            'quantity' => max(0.0, $remainingQuantity),
-            'ordered_quantity' => max(0.0, $orderedQuantity),
-            'shipped_quantity' => max(0.0, $shippedQuantity),
-            'in_transit_quantity' => $inTransitQuantity !== null ? max(0.0, $inTransitQuantity) : null,
+            'quantity' => isset($row['quantity']) && is_numeric($row['quantity']) ? (float)$row['quantity'] : 0.0,
         ];
     }
 

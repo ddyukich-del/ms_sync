@@ -2,6 +2,10 @@
 namespace Opencart\Admin\Model\Extension\MoyskladSync\Module;
 
 /**
+ * @author d_dyuk
+ */
+
+/**
  * Модель изображений МойСклад.
  *
  * Здесь находится только работа с БД и файловой структурой ocStore. Сетевые
